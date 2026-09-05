@@ -363,10 +363,21 @@ export class PersonaDrivenGenerator implements TaskGenerator {
     if (lastTaskName === 'WatchVideo' && lastSuccess && lastMeta?.quickClose === true) {
       nextState = MainState.HOME_FEED;
     }
-    // WatchVideo 正常看完（非秒退）→ 保持内容消费态：看完一个视频的满足感驱动「连刷下一个推荐视频」。
-    // 必须保持 content_consuming 才能连刷（leavingVideoState 会清空推荐流）；秒退则上面已回首页走 CloseVideo。
+    // WatchVideo 正常看完（非秒退）：
+    // - persona.behavior.close_video_after_watch_prob 看完关闭视频标签权重（≥1 恒关闭）：命中 → 离开内容态，
+    //   下一轮 CloseVideo 必然关闭视频页（forceCloseAfterWatch），而不是直接连刷 / 在视频页做其它任务；
+    // - 未命中 → 保持内容消费态（连刷下一个推荐视频，leavingVideoState 不触发、不清推荐流）。
+    const closeAfterWatchProb = this.persona.behavior?.close_video_after_watch_prob ?? 0;
+    const forceCloseAfterWatch =
+      lastTaskName === 'WatchVideo' &&
+      lastSuccess === true &&
+      lastMeta?.quickClose !== true &&
+      (closeAfterWatchProb >= 1 || Math.random() < closeAfterWatchProb);
     if (lastTaskName === 'WatchVideo' && lastSuccess && lastMeta?.quickClose !== true) {
-      nextState = MainState.CONTENT_CONSUMING;
+      nextState = forceCloseAfterWatch ? MainState.HOME_FEED : MainState.CONTENT_CONSUMING;
+      if (forceCloseAfterWatch) {
+        console.log(`   🚪 看完视频（close_video_after_watch=${closeAfterWatchProb}）→ 关闭视频标签页`);
+      }
     }
 
     // 离开视频态：仅当「上一任务确实在视频页消费过且成功」且下一状态不再继续看 → CloseVideo 必然。
@@ -417,6 +428,7 @@ export class PersonaDrivenGenerator implements TaskGenerator {
       needSearch: lastMeta?.needSearch === true,
       retryWatchVideo: this.retryWatchVideo,
       quickCloseVideo: lastTaskName === 'WatchVideo' && lastSuccess === true && lastMeta?.quickClose === true,
+      forceCloseAfterWatch,
       leavingVideoState,
       videoDuration: typeof lastMeta?.videoDuration === 'number' ? lastMeta.videoDuration : undefined,
       // 上一个 WatchVideo 的实际观看完整度（供连刷概率绑定：看得越久越可能连刷下一个推荐视频）

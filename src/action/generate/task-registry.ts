@@ -67,6 +67,8 @@ export interface GenerationContext {
   retryWatchVideo?: boolean;
   /** WatchVideo 秒关（快速关闭视频）→ 关掉当前视频标签页（CloseVideo 必然） */
   quickCloseVideo?: boolean;
+  /** 看完视频后按人格权重 close_video_after_watch_prob 决定关闭视频标签（CloseVideo 必然） */
+  forceCloseAfterWatch?: boolean;
   /** 离开视频态（当前在视频页且下一状态不是继续看）→ CloseVideo 必然 */
   leavingVideoState?: boolean;
   /**

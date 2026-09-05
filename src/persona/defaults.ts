@@ -57,6 +57,7 @@ export const DEFAULT_BEHAVIOR: PersonaBehaviorConfig = {
   binge_watch_tendency: 0.7,
   video_watch_ratio: [0.3, 0.9],
   early_exit_prob: 0.3,
+  close_video_after_watch_prob: 0,
 };
 
 /** 默认错误倾向（对应 DESIGN 3.2 error_rate） */

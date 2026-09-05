@@ -307,6 +307,10 @@ export function registerAllTasks(): void {
       if (ctx.quickCloseVideo) {
         return 1;
       }
+      // 人格权重：看完视频后按 close_video_after_watch_prob 命中 → 关闭当前视频标签页——必然
+      if (ctx.forceCloseAfterWatch) {
+        return 1;
+      }
       const videoTabs = ctx.pageFeatures?.videoTabCount ?? 0;
       const tabCount = ctx.pageFeatures?.tabCount ?? 0;
       // 从视频页进入搜索页后的「关掉前一个视频页」偏置（一次性，未生成则逐轮衰减）：

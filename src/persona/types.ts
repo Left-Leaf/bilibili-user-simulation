@@ -30,6 +30,9 @@ export interface PersonaBehaviorConfig {
   video_watch_ratio: [number, number];
   /** 10 秒内退出视频的概率 */
   early_exit_prob: number;
+  /** 看完视频后关闭视频标签页的权重（0..1，≥1 恒关闭）：命中则在观看任务结束后关闭视频页回非视频页，
+   *  而不是直接连刷 / 在视频页继续做其它任务。 */
+  close_video_after_watch_prob: number;
 }
 
 /** 错误倾向参数（DESIGN 3.2 error_rate，下划线命名） */
