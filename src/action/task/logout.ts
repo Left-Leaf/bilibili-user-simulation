@@ -1,4 +1,4 @@
-﻿import { BaseTask, TaskResult, TaskStatus } from './base';
+import { BaseTask, TaskResult, TaskStatus } from './base';
 import type { TaskContext } from '../execute/context';
 import { MainState } from '../engine/state';
 import { MouseMoveBehavior, LeftClickBehavior, SleepBehavior, NavigateBehavior } from '../behavior';

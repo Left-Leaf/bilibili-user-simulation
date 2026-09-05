@@ -1,4 +1,4 @@
-﻿/**
+/**
  * example（模块用法）：演示「把 bilibili-user-simulation 作为依赖包导入，由主项目调用启动」。
  *
  * 与 run-headless/headed（example 独立启动：包内默认人格 + config-app 出口）不同，

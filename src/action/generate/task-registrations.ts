@@ -1,4 +1,4 @@
-﻿import { registerTask, type GenerationContext } from './task-registry';
+import { registerTask, type GenerationContext } from './task-registry';
 import { MainState } from '../engine/state';
 import { BrowseHomeTask } from '../task/browse-home';
 import { BrowseDynamicTask } from '../task/browse-dynamic';

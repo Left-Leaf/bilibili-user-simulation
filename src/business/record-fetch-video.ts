@@ -1,4 +1,4 @@
-﻿/**
+/**
  * 蹲饼录屏（调试用，不影响业务）。
  *
  * 触发：update 提示（update_num>0）进入 runFetchSession 时开始录屏，

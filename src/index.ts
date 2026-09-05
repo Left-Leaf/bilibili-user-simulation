@@ -1,4 +1,4 @@
-﻿/**
+/**
  * bilibili-user-simulation 库入口（模块用法）：主项目 `import` 后调用启动。
  *
  * 两种用法：

@@ -1,4 +1,4 @@
-﻿# bilibili-user-simulation
+# bilibili-user-simulation
 
 人格驱动的 B 站养号 + 被动蹲饼引擎（**独立 git 仓库 / 可独立启动**的依赖包）。
 

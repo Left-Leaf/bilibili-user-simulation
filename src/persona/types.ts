@@ -77,6 +77,11 @@ export interface PersonaConfig {
     category_bias: Record<string, number>; // key = B站 tname
   };
 
+  /** ★ 蹲饼目标 UP（指向性动态获取）：引擎在「加载人格 + 登录后」的对齐流程会确保已关注这些 UP，
+   *  其动态将进入关注动态流并被 passive-fetch 定向捕获/投递。uid 优先（直接进其主页关注），
+   *  name 用于日志展示（缺 uid 时暂不自动搜索关注）。 */
+  fetch_targets?: Array<{ uid?: string; name: string }>;
+
   /** 行为习惯（R1/R3/R4） */
   behavior?: PersonaBehaviorConfig;
 

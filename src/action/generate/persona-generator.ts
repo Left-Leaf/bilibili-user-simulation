@@ -1,4 +1,4 @@
-﻿import type { TaskGenerator } from './generator';
+import type { TaskGenerator } from './generator';
 import type { Task } from '../task/base';
 import type { TaskContext } from '../execute/context';
 import { OpenVideoTask } from '../task/open-video';

@@ -71,6 +71,11 @@
     }
   },
 
+  "fetch_targets": [
+    { "uid": "161775300", "name": "明日方舟" },
+    { "uid": "1265652806", "name": "明日方舟终末地" }
+  ],
+
   "behavior": {
     "dwell_time": {
       "home_feed": [20, 12],

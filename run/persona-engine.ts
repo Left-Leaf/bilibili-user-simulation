@@ -26,10 +26,12 @@ import {
   getDynamicCount,
   setDynamicListener,
   setFetchReportConfig,
+  setFetchTargets,
   waitForInitialFetch,
 } from '../src/business/passive-fetch.js';
 import type { DynamicListener } from '../src/business/passive-fetch.js';
 import type { PersonaConfig } from '../src/persona/types.js';
+import { syncFetchTargets } from '../src/business/target-sync.js';
 import { loadFetchReportConfig } from './fetch-report-config.js';
 import { loadFetchRecordingConfig, setFetchRecordingByCommand } from './fetch-recording-config.js';
 import { isFetchRecordingEnabled } from '../src/business/record-fetch-video.js';
@@ -306,11 +308,17 @@ export async function runPersonaEngine(opts: PersonaRunOptions): Promise<void> {
 
   let persona = resolvePersona(opts);
   let circadian = persona.circadian;
+  /** 蹲饼目标已对齐的人格 id（每个 persona 每次登录后只对齐一次，避免每轮上线都去核实关注） */
+  let targetsSyncedFor: string | null = null;
+  // 指向性动态获取：把 persona.fetch_targets 注入 passive-fetch（非空时只捕获这些 UP 的动态）
+  setFetchTargets(persona.fetch_targets ?? []);
 
   /** 热重启：重新加载人格配置（reload 指令触发），更新运行变量 */
   const reloadPersona = (): void => {
     persona = resolvePersona(opts);
     circadian = persona.circadian;
+    targetsSyncedFor = null; // 人格变了 → 蹲饼目标需重新对齐
+    setFetchTargets(persona.fetch_targets ?? []);
     console.log(`♻️ 已重载人格配置: ${persona.meta.name} - ${persona.meta.description}`);
   };
 
@@ -522,6 +530,22 @@ export async function runPersonaEngine(opts: PersonaRunOptions): Promise<void> {
 
     // 被动蹲饼：登录成功后才打开动态页并开始获取
     const loggedIn = hasLogin || ctx.state.get('isLoggedIn') === true;
+
+    // 蹲饼目标对齐（每个 persona 一次）：登录后先获取当前关注 UP，与 persona.fetch_targets 比较，
+    // 关注缺失的目标 UP；该流程结束后才进入模拟行为（其动态随后进入关注流被定向捕获）。
+    const targets = persona.fetch_targets ?? [];
+    if (loggedIn && targets.length > 0 && targetsSyncedFor !== persona.id) {
+      console.log(`[${fmtClock(Date.now())}] [蹲饼目标] 🎯 开始对齐目标 UP（共 ${targets.length} 个）…`);
+      const reports = await syncFetchTargets(ctx, targets).catch(() => []);
+      for (const r of reports) {
+        const tag = r.status === 'followed' ? '✅ 已关注' : r.status === 'now-followed' ? '➕ 新关注' : '⚠️ 失败';
+        const who = r.target.name || r.target.uid || '(未命名)';
+        console.log(`[蹲饼目标]   ${tag} ${who}${r.detail ? '｜' + r.detail : ''}`);
+      }
+      targetsSyncedFor = persona.id;
+      console.log(`[${fmtClock(Date.now())}] [蹲饼目标] ✅ 目标 UP 对齐完成，开始进入模拟行为流程`);
+    }
+
     const dynPage = loggedIn ? await ensureDynamicPage(ctx).catch(() => null) : null;
     if (dynPage) {
       console.log(`[${fmtClock(Date.now())}] [被动蹲饼] 🥞 就绪：动态页 ${dynPage.url().slice(0, 50)}（监听动态流接口获取动态数据）`);

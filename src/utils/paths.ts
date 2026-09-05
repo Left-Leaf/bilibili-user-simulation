@@ -1,4 +1,4 @@
-﻿/**
+/**
  * 包根相对路径助手：bilibili-user-simulation 需**独立启动**（不依赖宿主 cwd）。
  *
  * 早期实现用 `process.cwd()` 解析 data/logs/puppeteer-browser/config 等运行数据，

@@ -1,4 +1,4 @@
-﻿/**
+/**
  * 被动蹲饼（动态页监听，业务层）。
  *
  * 设计：不再主动去目标 UP 主页蹲饼（旧 fetch-slot 坑位已删除），改为「被动蹲饼」——
@@ -60,6 +60,32 @@ export interface FetchReportConfig {
 
 /** 当前外发配置（默认关闭） */
 let reportConfig: FetchReportConfig = { enable: false, url: '', batchSize: 50 };
+
+/** 蹲饼目标 UP（指向性）：非空时只捕获/投递这些作者的动态 */
+let targetUids = new Set<string>();
+let targetNames = new Set<string>();
+
+/** 注册蹲饼目标（引擎从 persona.fetch_targets 设置）；传空 = 不过滤（捕获关注流全部动态） */
+export function setFetchTargets(targets: Array<{ uid?: string; name?: string }>): void {
+  targetUids = new Set<string>();
+  targetNames = new Set<string>();
+  for (const t of targets ?? []) {
+    if (t?.uid) {
+      targetUids.add(String(t.uid));
+    }
+    if (t?.name) {
+      targetNames.add(String(t.name));
+    }
+  }
+}
+
+/** 该动态是否属于蹲饼目标（未配置目标时恒 true = 全收） */
+function isTargetDynamic(d: FetchedDynamic): boolean {
+  if (targetUids.size === 0 && targetNames.size === 0) {
+    return true;
+  }
+  return targetUids.has(String(d.uid)) || targetNames.has(String(d.author));
+}
 
 /**
  * 动态监听回调：主项目以「模块」方式接入时注册，模块内部每次捕获到一批动态即回调。
@@ -335,6 +361,10 @@ export function extractDynamicsFromPayload(payload: unknown): FetchedDynamic[] {
     }
   } catch {
     /* 解析失败忽略 */
+  }
+  // 指向性过滤：配置了蹲饼目标（fetch_targets）时，只保留目标作者的动态
+  if (targetUids.size > 0 || targetNames.size > 0) {
+    return out.filter(isTargetDynamic);
   }
   return out;
 }

@@ -1,4 +1,4 @@
-﻿import { BaseTask, TaskResult } from './base';
+import { BaseTask, TaskResult } from './base';
 import type { TaskContext } from '../execute/context';
 import { MainState } from '../engine/state';
 import { SleepBehavior, CloseBrowserBehavior } from '../behavior';

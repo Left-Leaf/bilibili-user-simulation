@@ -118,6 +118,7 @@ export function createDefaultPersona(id = 'default'): PersonaConfig {
     state_transition_bias: { ...DEFAULT_STATE_BIAS },
     initial_state_dist: { ...DEFAULT_INITIAL_STATE_DIST },
     interests: { keywords: [], up_uid_affinity: [], category_bias: {} },
+    fetch_targets: [],
     behavior: structuredClone(DEFAULT_BEHAVIOR),
     error_rate: structuredClone(DEFAULT_ERROR_RATE),
   };

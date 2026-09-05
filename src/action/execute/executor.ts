@@ -1,4 +1,4 @@
-﻿import { TaskStatus, type Task, type TaskResult } from '../task/base';
+import { TaskStatus, type Task, type TaskResult } from '../task/base';
 import type { TaskGenerator } from '../generate/generator';
 import { TaskEvent } from './context';
 import type { TaskContext } from './context';
