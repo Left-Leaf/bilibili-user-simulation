@@ -13,6 +13,7 @@
   "dependencies": {
     "ghost-cursor": "^1.2.0",
     "json5": "^2.2.3",
+    "puppeteer": "^22.9.0",
     "puppeteer-core": "^22.9.0",
     "puppeteer-extra": "^3.3.6",
     "puppeteer-extra-plugin-stealth": "^2.11.2",

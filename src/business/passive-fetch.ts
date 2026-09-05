@@ -61,6 +61,19 @@ export interface FetchReportConfig {
 /** 当前外发配置（默认关闭） */
 let reportConfig: FetchReportConfig = { enable: false, url: '', batchSize: 50 };
 
+/**
+ * 动态监听回调：主项目以「模块」方式接入时注册，模块内部每次捕获到一批动态即回调。
+ * kind: 'INIT' 初始加载 / 'UPDATE' 轮询更新。注册后动态交给监听器（不再自动外发/落盘）。
+ */
+export type DynamicListener = (dynamics: FetchedDynamic[], kind: 'INIT' | 'UPDATE') => void;
+
+let dynamicListener: DynamicListener | null = null;
+
+/** 注册动态监听（模块接入方在启动引擎前调用）；传 null 取消，回到内置外发/落盘出口 */
+export function setDynamicListener(listener: DynamicListener | null): void {
+  dynamicListener = listener;
+}
+
 /** 未配置外发接口时动态落盘的本地文档（logs/ 已被 .gitignore 忽略，不会上传） */
 const LOCAL_DOC_PATH = packagePath('logs', 'fetched-dynamics.md');
 
@@ -161,7 +174,13 @@ function deliverDynamics(dynamics: FetchedDynamic[], kind: 'INIT' | 'UPDATE'): v
   if (dynamics.length > 10) {
     console.log(`   … 其余 ${dynamics.length - 10} 条省略`);
   }
-  // 数据出口：配置了外发接口 → POST 外部项目；未配置 → 提炼基本信息写本地文档
+  // 数据出口：
+  // - 模块接入方注册了动态监听（setDynamicListener / 引擎 onDynamics）→ 交给监听器（外发/落盘由主项目决定）
+  // - 否则（example 独立运行）：配置了外发接口 → POST 外部项目；未配置 → 提炼基本信息写本地文档
+  if (dynamicListener) {
+    dynamicListener(dynamics, kind);
+    return;
+  }
   if (reportConfig.enable) {
     void deliverToExternal(dynamics, kind);
   } else {

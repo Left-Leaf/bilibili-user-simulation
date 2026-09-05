@@ -18,15 +18,18 @@ import { LoginTask } from '../src/action/task/login.js';
 import { LogoutTask } from '../src/action/task/logout.js';
 import { setMouseTrailVisible } from '../src/action/behavior/mouse.js';
 import { TaskExecutor } from '../src/action/execute/executor.js';
-import { loadPersona } from '../src/persona/loader.js';
+import { loadPersona, loadPersonaFromFile } from '../src/persona/loader.js';
 import { PersonaDrivenGenerator, type GeneratorControl } from '../src/action/generate/persona-generator.js';
 import {
   ensureDynamicPage,
   getCollectedDynamics,
   getDynamicCount,
+  setDynamicListener,
   setFetchReportConfig,
   waitForInitialFetch,
 } from '../src/business/passive-fetch.js';
+import type { DynamicListener } from '../src/business/passive-fetch.js';
+import type { PersonaConfig } from '../src/persona/types.js';
 import { loadFetchReportConfig } from './fetch-report-config.js';
 import { loadFetchRecordingConfig, setFetchRecordingByCommand } from './fetch-recording-config.js';
 import { isFetchRecordingEnabled } from '../src/business/record-fetch-video.js';
@@ -173,7 +176,26 @@ export interface PersonaRunOptions {
   mouseTrail?: boolean;
   /** 详细输出每个任务动作（有头观察用） */
   verbose?: boolean;
+  /** 人格来源①：包内 data/personas/{personaId}.json（默认 ak-night-worker） */
   personaId?: string;
+  /** 人格来源②：外部人格配置文件绝对路径（主项目以模块方式接入时指明） */
+  personaFile?: string;
+  /** 人格来源③：直接传入人格对象（优先级最高） */
+  persona?: PersonaConfig;
+  /** 动态监听：主项目以模块方式接入时注册，模块内部每次捕获到动态即回调（kind: 'INIT'|'UPDATE'）。
+   *  注册后动态不再走 config-app 外发/本地文档（由主项目决定出口）。 */
+  onDynamics?: DynamicListener;
+}
+
+/** 按选项解析人格：对象 > 文件 > 包内 id */
+function resolvePersona(opts: PersonaRunOptions): PersonaConfig {
+  if (opts.persona) {
+    return opts.persona;
+  }
+  if (opts.personaFile) {
+    return loadPersonaFromFile(opts.personaFile);
+  }
+  return loadPersona(opts.personaId ?? 'ak-night-worker');
 }
 
 export async function runPersonaEngine(opts: PersonaRunOptions): Promise<void> {
@@ -182,8 +204,14 @@ export async function runPersonaEngine(opts: PersonaRunOptions): Promise<void> {
     setMouseTrailVisible(true);
   }
 
-  // 被动蹲饼外发接口：拦截到的动态 POST 给外部项目处理（从 config-app.json5 读取）
-  setFetchReportConfig(loadFetchReportConfig());
+  // 动态出口二选一：
+  // - 模块模式：主项目注册 onDynamics → 捕获的动态直接交给监听器（不再读 config-app 外发/落盘）
+  // - example 模式：未注册 → 读 config-app.json5 决定「外发接口 / 本地文档落盘」
+  const moduleMode = typeof opts.onDynamics === 'function';
+  setDynamicListener(opts.onDynamics ?? null);
+  if (!moduleMode) {
+    setFetchReportConfig(loadFetchReportConfig());
+  }
 
   // 被动蹲饼录屏开关（从 config-app.json5 读取，默认关闭）
   loadFetchRecordingConfig();
@@ -276,12 +304,12 @@ export async function runPersonaEngine(opts: PersonaRunOptions): Promise<void> {
     }
   }, 60_000);
 
-  let persona = loadPersona(opts.personaId ?? 'ak-night-worker');
+  let persona = resolvePersona(opts);
   let circadian = persona.circadian;
 
   /** 热重启：重新加载人格配置（reload 指令触发），更新运行变量 */
   const reloadPersona = (): void => {
-    persona = loadPersona(opts.personaId ?? 'ak-night-worker');
+    persona = resolvePersona(opts);
     circadian = persona.circadian;
     console.log(`♻️ 已重载人格配置: ${persona.meta.name} - ${persona.meta.description}`);
   };
