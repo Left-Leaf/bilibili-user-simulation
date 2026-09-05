@@ -1,0 +1,12 @@
+{
+  // 被动蹲饼：动态数据外发（把拦截到的动态 POST 到此接口交给外部项目处理）
+  fetch_report: {
+    enable: false,   // 是否启用外发
+    url: '',         // 外部接口地址（POST JSON），如 http://127.0.0.1:8000/api/fetch-dynamics
+    batch_size: 50,  // 单次请求最多条数（超过则分拆多个请求发送）
+  },
+  // 被动蹲饼：蹲饼录屏（调试用，回放定位「获取不到新动态」的原因），默认关闭
+  fetch_recording: {
+    enable: false,   // 是否录屏：蹲饼触发时对动态页开启 CDP screencast，合成 mp4 到 logs/screencast/
+  },
+}

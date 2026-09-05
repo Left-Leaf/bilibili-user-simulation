@@ -1,0 +1,27 @@
+{
+  "name": "persona-engine",
+  "version": "0.0.1",
+  "private": true,
+  "description": "人格驱动的 B 站养号 + 被动蹲饼核心引擎（独立 git 仓库/可独立启动）：persona 人格 / action 行为执行 / business 蹲饼分发",
+  "type": "module",
+  "main": "src/index.ts",
+  "scripts": {
+    "start:headless": "npx --node-options=\"--experimental-specifier-resolution=node --no-warnings --loader ts-node/esm\" ts-node --project tsconfig.json run/run-headless.ts",
+    "start:headed": "npx --node-options=\"--experimental-specifier-resolution=node --no-warnings --loader ts-node/esm\" ts-node --project tsconfig.json run/run-headed.ts",
+    "typecheck": "tsc --noEmit --skipLibCheck"
+  },
+  "dependencies": {
+    "ghost-cursor": "^1.2.0",
+    "json5": "^2.2.3",
+    "puppeteer-core": "^22.9.0",
+    "puppeteer-extra": "^3.3.6",
+    "puppeteer-extra-plugin-stealth": "^2.11.2",
+    "qrcode-terminal": "^0.12.0"
+  },
+  "devDependencies": {
+    "@swc/core": "^1.4.13",
+    "@types/node": "^20.8.6",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.2.2"
+  }
+}

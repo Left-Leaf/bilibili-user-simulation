@@ -1,0 +1,12 @@
+# 依赖与构建
+node_modules/
+dist/
+
+# 运行期数据（gitignore；克隆后自动生成）
+logs/
+puppeteer-browser/
+*.log
+*.jsonl
+
+# 蹲饼增量基线（运行期状态，非源数据）
+data/last-fetched-dynamic.json
