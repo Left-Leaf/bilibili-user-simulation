@@ -222,9 +222,6 @@ export async function runPersonaEngine(opts: PersonaRunOptions): Promise<void> {
 
   // === 运行时控制：登录失效停止 / 强制登录 / 强制退出登录 ===
   const control: GeneratorControl = { stopped: false, forceLogin: false, forceLogout: false };
-  // 是否已自动尝试过登录：检测到未登录时第一次自动进登录流程（弹码），
-  // 失败后改为等待手动 login（避免每次上线都反复自动弹码）
-  let autoLoginTried = false;
   // 登录失效/未登录/退出登录时保持打开的浏览器上下文（只留 B 站主页，等 login 复用）
   let keptCtx: TaskContext | null = null;
   let currentCtx: TaskContext | null = null;
@@ -503,29 +500,26 @@ export async function runPersonaEngine(opts: PersonaRunOptions): Promise<void> {
       stopOnError: false,
     });
 
-    // 未登录：自动登录一次（首次），之后失败等待手动 login——此时尚未「上线」（须打开浏览器并确认登录）
+    // 未登录：登录是「每次启动 / 每次重新打开浏览器后」的强制前置闸门 ——
+    // 自动执行登录任务并等待扫码，直到登录成功才进入后续（动态页 / 蹲饼 / 模拟行为）。
+    // 不登录成功，不开始任何后续任务；Ctrl+C 可退出。
     if (!hasLogin) {
-      if (control.forceLogin || !autoLoginTried) {
-        // 首次检测到未登录自动登录，或 login 指令强制登录：直接执行登录任务（不经生成器）
-        control.forceLogin = false;
-        autoLoginTried = true;
-        console.log('📱 检测到未登录，自动执行登录任务（请在浏览器扫码）…');
-        await executor.runTask(new LoginTask());
-        if (ctx.state.get('isLoggedIn') !== true) {
-          control.stopped = true; // 登录未完成 → 保持浏览器等待，扫码后可再 login
-          console.error('❌ 登录未完成（未检测到登录态）。浏览器保持打开，扫码后输入 login 指令可重新尝试。');
-        }
-      } else {
-        // 已自动尝试过仍失败 → 未登录不算上线，保持浏览器只留主页，回顶部等待手动 login
-        control.stopped = true;
-      }
-      if (control.stopped) {
+      console.log('🔒 未登录：开始强制登录流程（必须先登录才能开始任务）。');
+      let loggedIn = false;
+      let loginTries = 0;
+      while (!loggedIn) {
+        loginTries += 1;
+        // 每次尝试前只保留主页，清掉残留登录弹窗/标签，给 LoginTask 一个干净页面
         await keepOnlyHomePage(ctx.browser).catch(() => {});
-        keptCtx = ctx;
-        currentCtx = ctx;
-        continue; // 回 while 顶部：由统一等待提示告知用户（不打印「上线」头）
+        console.log(`📱 执行登录任务（第 ${loginTries} 次，请在浏览器扫码）…`);
+        await executor.runTask(new LoginTask());
+        loggedIn = ctx.state.get('isLoggedIn') === true;
+        if (!loggedIn) {
+          console.warn('⏳ 未检测到登录（未扫码或超时）。浏览器保持打开等您扫码，稍后会自动重新弹出登录码…（Ctrl+C 可退出）');
+          await sleepReal(4000);
+        }
       }
-      // 登录流程刚成功（isLoggedIn=true）→ 落入下方会话
+      console.log('🔓 登录成功，开始后续流程…');
     }
 
     // 到这里：浏览器已打开且确认登录 → 判定「上线」，打印上线头
