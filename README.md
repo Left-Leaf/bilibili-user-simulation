@@ -61,6 +61,63 @@ await runPersonaEngine({
 
 > Ctrl+C：优雅关闭浏览器并退出（避免 Chrome 孤儿进程锁住 `puppeteer-browser/data`）。
 
+## 人格配置字段说明（data/personas/*.json）
+
+人格 = 养号行为 + 蹲饼目标的「人设」。加载时会与 `src/persona/defaults.ts` 的默认值**深层合并**，
+缺省字段自动兜底——只需写想改的字段。示例：`data/personas/ak-night-worker.json`。
+
+### 顶层
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `id` | string | 人格 id（引擎参数/指令里用；缺省用文件名） |
+| `meta` | object | `name`/`description`/`age`/`occupation`/`gender`(`male\|female`)/`bio`，展示用 |
+| `state_transition_bias` | object | **状态转移偏置**（人格差异根源）：`from状态 → { to状态: 乘性系数 }`，稀疏、缺省 1.0=常人；调制 BASE_MATRIX 后归一化，马尔科夫游走据此涌现行为序列 |
+| `initial_state_dist` | object | 上线起点分布：`状态名 → 概率`（替代「目的→入口」） |
+| `interests` | object | 兴趣偏置（内容相关度） |
+| `fetch_targets` | array | **蹲饼目标 UP**（指向性动态获取）：`[{ uid?, name }]`。引擎登录后确保关注这些 UP，其动态被定向捕获/投递 |
+
+`interests`：
+- `keywords: string[]` —— 搜索/内容偏好关键词
+- `up_uid_affinity: Array<{ uid?, name }>` —— 关注的 UP（名字为主、uid 可选）
+- `category_bias: Record<tname, number>` —— 分区(如「游戏」)权重
+
+`fetch_targets`（蹲饼指向性）：
+- 数组元素 `{ uid, name }`，**uid 优先**（直接进主页关注）；name 用于展示
+- 引擎启动/重载时注入 passive-fetch：非空时**只捕获/投递这些 UP 的动态**；空数组 = 不过滤（捕获关注流全部）
+
+### `behavior` —— 行为习惯（多数 0..1 概率或区间）
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `dwell_time` | object | 各状态停留时长 `[均值, 标准差]`（秒），键如 `home_feed`/`content_consuming`… |
+| `scroll_speed_px_per_sec` | `[min,max]` | 滚动速度区间（px/s） |
+| `scroll_pause_prob` | 0..1 | 滚动中停下细看概率 |
+| `scroll_back_prob` | 0..1 | 回滚重看概率 |
+| `like_prob` / `coin_prob` / `collect_prob` / `comment_prob` / `share_prob` | 0..1 | 点赞/投币/收藏/评论/转发概率 |
+| `follow_prob` | 0..1 | UP 主页关注概率 |
+| `binge_watch_tendency` | 0..1 | 连刷倾向（看完一个视频继续刷推荐） |
+| `video_watch_ratio` | `[min,max]` | 视频观看比例（如 0.3~0.9 后退出） |
+| `early_exit_prob` | 0..1 | 10s 内提前退出视频概率（秒关） |
+| `close_video_after_watch_prob` | 0..1 | **看完视频后关闭标签页权重**：命中则观看结束即关视频页回非视频页（不连刷/不在视频页做其它任务）；**≥1 恒关闭** |
+
+### `error_rate` —— 拟人失误倾向
+
+`misclick_prob` / `typo_prob` / `premature_close_prob` / `double_click_prob` / `back_button_prob` / `idle_wander_prob`(0..1)，
+`idle_wander_duration_ms: [min,max]`(漫游时长 ms)，`skip_interaction_prob`(0..1)。
+
+### `circadian` —— 作息（决定在线/休息节奏）
+
+| 字段 | 说明 |
+| --- | --- |
+| `chronotype` | `morning_lark\|afternoon_peak\|night_owl\|reversed`（示例夜猫子） |
+| `peak_width_hours` | 活跃高峰宽度（小时） |
+| `sleep_time` | 睡眠段 `[起,止]` 小时，支持跨午夜（如 `[2,9]`），睡眠段强制离线 |
+| `online_minutes` | 单次在线时长范围 `[min,max]`（分钟），意愿高时更持久 |
+| `offline_minutes` | 两次在线间休息范围 `[min,max]`（分钟） |
+
+> 完整类型定义见 `src/persona/types.ts`；默认值见 `src/persona/defaults.ts`（BASE_MATRIX 转移矩阵、DEFAULT_BEHAVIOR、DEFAULT_ERROR_RATE）。
+
 ## 目录
 
 ```
