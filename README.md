@@ -22,8 +22,9 @@ npm run typecheck
 
 - 人格默认取包内 `data/personas/{id}.json`；
 - 动态出口读 `config-app.json5`：`fetch_report` 外发接口，未配置则写本地 `logs/fetched-dynamics.md`；
-- 首次登录：启动后向 stdin 输入 `login` 扫码（有头弹窗 / 无头终端二维码）。
-- stdin 指令：`login` `logout` `reload` `online` `record on|off` `status` `help`。
+- 登录：启动后若未登录会自动进入**强制登录闸门**并弹出二维码（有头窗口 / 无头终端二维码）等待扫码，
+  登录成功后才开始后续流程（蹲饼目标对齐 → 动态页 → 模拟行为）；退出登录/等待重登时可用 `login` 指令重新扫码。
+- 引擎运行时通过 **stdin** 接收指令（见下「运行时指令」）：`login` `logout` `reload` `online` `record on|off` `status` `help`。
 
 ### 2) 模块：被主项目 import 后由主项目启动
 
@@ -43,6 +44,22 @@ await runPersonaEngine({
   自动外发/写本地文档（出口由主项目决定）。
 - 也可直接 `setDynamicListener(fn)` / `loadPersonaFromFile(path)`（见 `src/index.ts` 导出）。
 - 可运行示例：`ts-node run/example-module.ts <人格JSON路径>`。
+
+## 运行时指令（stdin）
+
+引擎运行中在**终端（stdin）输入一行指令**即可控制（模块接入时复用宿主进程的 stdin）。
+
+| 指令 | 名称 | 说明 |
+| --- | --- | --- |
+| `login` | 登录 | 强制执行登录流程（弹出/重打二维码等待扫码）。启动后未登录会自动进入登录闸门，一般无需手动输入；用于「退出登录后 / 等待重登态」解除等待重新扫码，或换号登录。 |
+| `logout` | 退出登录 | 退出当前账号：中断当前任务流，收尾执行 LogoutTask 登出 → 下线；浏览器保持打开（仅 B 站主页），等待重新登录。 |
+| `online` | 强制唤醒（上线） | 强制结束当前休息——无论是长休息任务（RestTask 已关浏览器离线）还是会话间的下线休息倒计时——立即重新打开浏览器 → 过登录闸门 → 重新开动态页开始获取动态 → 进入模拟用户行为。 |
+| `reload` | 热重启 | 结束当前上线周期，**重载人格配置**后立即重新上线（跳过下线休息）。改 `data/personas/*.json`（人格 / `fetch_targets` 蹲饼目标）后用此令生效。 |
+| `record on` / `record off` | 蹲饼录屏开关 | 开关蹲饼录屏（CDP screencast → `logs/screencast/`，用于回放定位「取不到新动态」原因）；写回 `config-app.json5` 的 `fetch_recording`，重启后仍生效。输入 `record` 查询当前开关状态。 |
+| `status` | 状态快照 | 打印：人格 / 上线次数 / 任务统计 / 生成器主状态 / 当前页面 URL / 标签页 / 上一任务 / 登录态 / 被动蹲饼已抓动态 / 控制标志。 |
+| `help` | 帮助 | 列出全部可用指令。 |
+
+> Ctrl+C：优雅关闭浏览器并退出（避免 Chrome 孤儿进程锁住 `puppeteer-browser/data`）。
 
 ## 目录
 
