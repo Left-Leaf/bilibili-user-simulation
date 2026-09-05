@@ -1,4 +1,4 @@
-# persona-engine
+﻿# bilibili-user-simulation
 
 人格驱动的 B 站养号 + 被动蹲饼引擎（**独立 git 仓库 / 可独立启动**的依赖包）。
 
@@ -28,7 +28,7 @@ npm run typecheck
 ### 2) 模块：被主项目 import 后由主项目启动
 
 ```ts
-import { runPersonaEngine } from 'persona-engine'; // 库入口 = src/index.ts
+import { runPersonaEngine } from 'bilibili-user-simulation'; // 库入口 = src/index.ts
 
 await runPersonaEngine({
   headless: true,

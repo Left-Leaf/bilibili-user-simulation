@@ -1,4 +1,4 @@
-import { registerTask, type GenerationContext } from './task-registry';
+﻿import { registerTask, type GenerationContext } from './task-registry';
 import { MainState } from '../engine/state';
 import { BrowseHomeTask } from '../task/browse-home';
 import { BrowseDynamicTask } from '../task/browse-dynamic';
@@ -77,7 +77,7 @@ function decideBrowseProfile(ctx: GenerationContext): { target: ProfileEntry | n
 export function registerAllTasks(): void {
   // ===== 登录（运行时 login 指令 / 登录失效重登时强制）=====
   // 仅在 ctx.forceLogin 时为必然（概率=1），否则不参与正常任务流（概率=0）。
-  // userDataDir/headless 由 LoginTask.execute 从 context.state 读取（persona-engine 注入）。
+  // userDataDir/headless 由 LoginTask.execute 从 context.state 读取（bilibili-user-simulation 注入）。
   registerTask({
     name: 'Login',
     probability: (ctx) => (ctx.forceLogin ? 1 : 0),

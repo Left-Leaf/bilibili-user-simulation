@@ -1,4 +1,4 @@
-/**
+﻿/**
  * 被动蹲饼（动态页监听，业务层）。
  *
  * 设计：不再主动去目标 UP 主页蹲饼（旧 fetch-slot 坑位已删除），改为「被动蹲饼」——
@@ -11,7 +11,7 @@
  * - 未配置外发接口 → 提炼基本信息（作者/时间/文案）追加写入本地文档 `logs/fetched-dynamics.md`。
  * 内存 `collected` 仅作运行期观察（status 展示）。
  *
- * 使用（persona-engine 集成）：
+ * 使用（bilibili-user-simulation 集成）：
  * - 每轮浏览器打开后调用一次 `ensureDynamicPage(ctx)`：打开/复用动态页并挂监听；
  * - 周期调用 `ensureDynamicPage(ctx)`（后台监视器）保持「始终存在」；
  * - 启动时 `setFetchReportConfig({ enable, url, batchSize })` 注册外发接口。
@@ -77,7 +77,7 @@ export function setDynamicListener(listener: DynamicListener | null): void {
 /** 未配置外发接口时动态落盘的本地文档（logs/ 已被 .gitignore 忽略，不会上传） */
 const LOCAL_DOC_PATH = packagePath('logs', 'fetched-dynamics.md');
 
-/** 注册外发接口配置（persona-engine / watch-persona 启动时从 config-app.json5 读取后调用） */
+/** 注册外发接口配置（bilibili-user-simulation / watch-persona 启动时从 config-app.json5 读取后调用） */
 export function setFetchReportConfig(cfg: FetchReportConfig): void {
   reportConfig = {
     enable: cfg.enable === true && !!cfg.url,

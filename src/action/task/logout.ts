@@ -1,4 +1,4 @@
-import { BaseTask, TaskResult, TaskStatus } from './base';
+﻿import { BaseTask, TaskResult, TaskStatus } from './base';
 import type { TaskContext } from '../execute/context';
 import { MainState } from '../engine/state';
 import { MouseMoveBehavior, LeftClickBehavior, SleepBehavior, NavigateBehavior } from '../behavior';
@@ -50,7 +50,7 @@ const isLogoutItemVisible = async (page: NonNullable<TaskContext['page']>): Prom
  *   4. 点击抽屉里的「退出登录」（.logout-item）
  *   5. 等待确认已登出（SESSDATA cookie / 头像消失）
  *
- * 退出成功后 SESSDATA 被清除、isLoggedIn=false，执行器与 persona-engine 检测到后
+ * 退出成功后 SESSDATA 被清除、isLoggedIn=false，执行器与 bilibili-user-simulation 检测到后
  * 立即停止任务生成，等用户输入 login 重新登录。
  */
 export class LogoutTask extends BaseTask {

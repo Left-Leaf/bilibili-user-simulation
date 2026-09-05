@@ -1,4 +1,4 @@
-import type { TaskGenerator } from './generator';
+﻿import type { TaskGenerator } from './generator';
 import type { Task } from '../task/base';
 import type { TaskContext } from '../execute/context';
 import { OpenVideoTask } from '../task/open-video';
@@ -384,7 +384,7 @@ export class PersonaDrivenGenerator implements TaskGenerator {
 
     // 采到 BROWSER_CLOSED 且未被流程性覆盖改写 → 生成一个「长休息」任务作为下线的表现形式：
     // 模拟真人「判定离开电脑 → 关闭浏览器下线」，由 RestTask 长休息执行 CloseBrowserBehavior
-    // 关闭浏览器并返回 nextState=BROWSER_CLOSED；persona-engine 据此用长休息时长做离线倒计时
+    // 关闭浏览器并返回 nextState=BROWSER_CLOSED；bilibili-user-simulation 据此用长休息时长做离线倒计时
     // （longRestMs 判定），统一「下线」语义，避免直接 return null 造成「莫名下线 + 离线时长重采样」。
     // 时长恒 > 10min 长休息阈值（沿用 Rest 注册表长休息区间 30~120min）。
     if (nextState === MainState.BROWSER_CLOSED) {

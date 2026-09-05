@@ -1,5 +1,5 @@
-{
-  "name": "persona-engine",
+﻿{
+  "name": "bilibili-user-simulation",
   "version": "0.0.1",
   "private": true,
   "description": "人格驱动的 B 站养号 + 被动蹲饼核心引擎（独立 git 仓库/可独立启动）：persona 人格 / action 行为执行 / business 蹲饼分发",

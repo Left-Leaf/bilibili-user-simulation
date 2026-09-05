@@ -1,10 +1,10 @@
 ﻿/**
- * persona-engine 库入口（模块用法）：主项目 `import` 后调用启动。
+ * bilibili-user-simulation 库入口（模块用法）：主项目 `import` 后调用启动。
  *
  * 两种用法：
  * 1) example 独立启动：`npm run start:headless` / `start:headed`（入口在 run/）。
  *    以包内 `data/personas` 默认人格运行，动态出口 = 读 `config-app.json5`（外发接口 / 本地文档）。
- * 2) 模块接入（本文件）：`import { runPersonaEngine } from 'persona-engine'`，
+ * 2) 模块接入（本文件）：`import { runPersonaEngine } from 'bilibili-user-simulation'`，
  *    - 用 `personaFile`（或 `persona` 对象）指明人格配置文件；
  *    - 传 `onDynamics` 注册动态监听，接收模块内部捕获的动态（此时不再自动外发/落盘）。
  *

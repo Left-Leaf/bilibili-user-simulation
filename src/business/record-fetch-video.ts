@@ -1,4 +1,4 @@
-/**
+﻿/**
  * 蹲饼录屏（调试用，不影响业务）。
  *
  * 触发：update 提示（update_num>0）进入 runFetchSession 时开始录屏，
@@ -20,7 +20,7 @@ const SCREENCAST_ROOT = packagePath('logs', 'screencast');
 /** 录屏开关（默认关闭，由 run/config-app.json5 的 fetch_recording.enable 控制） */
 let recordingEnabled = false;
 
-/** 设置录屏开关（persona-engine / watch-persona 启动时从 config-app.json5 读取后调用） */
+/** 设置录屏开关（bilibili-user-simulation / watch-persona 启动时从 config-app.json5 读取后调用） */
 export function setFetchRecordingEnabled(enable: boolean): void {
   recordingEnabled = enable === true;
 }

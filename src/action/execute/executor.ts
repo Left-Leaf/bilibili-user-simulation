@@ -1,4 +1,4 @@
-import { TaskStatus, type Task, type TaskResult } from '../task/base';
+﻿import { TaskStatus, type Task, type TaskResult } from '../task/base';
 import type { TaskGenerator } from '../generate/generator';
 import { TaskEvent } from './context';
 import type { TaskContext } from './context';
@@ -160,7 +160,7 @@ export class TaskExecutor {
   }
 
   /**
-   * 直接执行单个任务（不经生成器）：供 persona-engine 直接发「启动 / 登录 / 登出」等流程任务。
+   * 直接执行单个任务（不经生成器）：供 bilibili-user-simulation 直接发「启动 / 登录 / 登出」等流程任务。
    * 执行器不判断暂停——任务自身的暂停由任务处理；这里只负责「接收并执行」。
    */
   async runTask(task: Task): Promise<TaskEvent> {

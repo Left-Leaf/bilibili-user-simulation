@@ -1,4 +1,4 @@
-import { BaseTask, TaskResult } from './base';
+﻿import { BaseTask, TaskResult } from './base';
 import type { TaskContext } from '../execute/context';
 import { MainState } from '../engine/state';
 import { SleepBehavior, CloseBrowserBehavior } from '../behavior';
@@ -19,7 +19,7 @@ export interface RestTaskInput {
  *
  * 任务**一开始**就根据休息时长决定类型：
  * - 长休息（durationMs > closeBrowserAfterMs）：判定用户离开 → **立即关闭浏览器下线**，
- *   返回 MainState.BROWSER_CLOSED（metadata.longRest=true）；离线等待由 persona-engine
+ *   返回 MainState.BROWSER_CLOSED（metadata.longRest=true）；离线等待由 bilibili-user-simulation
  *   用该任务 durationMs 执行，到点重开浏览器自动上线（期间蹲饼随之暂停）。
  * - 短休息（durationMs ≤ 阈值）：仅停止活动（浏览器保持打开、上线继续），
  *   期间可被「强制上线」指令提前结束。
@@ -52,7 +52,7 @@ export class RestTask extends BaseTask {
       // 任务一开始就根据休息时长决定：长休息 = 关闭浏览器下线；短休息 = 停止活动（浏览器保持打开）
       const isLong = durationMs > threshold;
 
-      // ===== 长休息：立即关闭浏览器下线（离线等待由 persona-engine 用 durationMs 执行）=====
+      // ===== 长休息：立即关闭浏览器下线（离线等待由 bilibili-user-simulation 用 durationMs 执行）=====
       if (isLong) {
         this.log(
           `🍽️ 长休息：${(durationMs / 1000).toFixed(0)}s（判定用户离开，立即关闭浏览器下线，${(durationMs / 60000).toFixed(1)} 分钟后重新上线）`

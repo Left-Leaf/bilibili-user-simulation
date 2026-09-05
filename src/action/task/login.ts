@@ -1,4 +1,4 @@
-import { BaseTask, TaskResult, TaskStatus } from './base';
+﻿import { BaseTask, TaskResult, TaskStatus } from './base';
 import type { TaskContext } from '../execute/context';
 import { MainState } from '../engine/state';
 import { OpenBrowserBehavior, NavigateBehavior, MouseMoveBehavior, LeftClickBehavior, ScanQrBehavior, SleepBehavior } from '../behavior';
@@ -58,7 +58,7 @@ export class LoginTask extends BaseTask {
   }
 
   async execute(context: TaskContext): Promise<TaskResult> {
-    // userDataDir/headless 优先取 context.state（persona-engine 正式运行注入），否则用构造 options
+    // userDataDir/headless 优先取 context.state（bilibili-user-simulation 正式运行注入），否则用构造 options
     const userDataDir = this.options.userDataDir ?? (context.state.get('loginUserDataDir') as string | undefined);
     const headless = this.options.headless ?? (context.state.get('loginHeadless') as boolean | undefined) ?? false;
     const { loginTimeoutMs = 180000 } = this.options;
