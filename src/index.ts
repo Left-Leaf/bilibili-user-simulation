@@ -27,3 +27,22 @@ export type { DynamicListener, FetchedDynamic } from './business/passive-fetch.j
 // 人格加载（模块接入方可用 loadPersonaFromFile 加载自己的配置文件）
 export { loadPersona, loadPersonaFromFile } from './persona/loader.js';
 export type { PersonaConfig } from './persona/types.js';
+
+// ===== 内核（推荐用法）：全局静态单一实例，统一管理浏览器会话 + 独立开关两大功能 =====
+// 用法：initialize()（开浏览器并登录）→ startSimulation()/stopSimulation()（模拟行为）
+//       → startFetch()/stopFetch()（被动蹲饼）→ shutdown()
+export { SimulationKernel, kernel } from './kernel/kernel.js';
+export type {
+  KernelInitializeOptions,
+  KernelFetchOptions,
+  KernelStopFetchOptions,
+  KernelStatus,
+  KernelConsoleOptions,
+} from './kernel/kernel.js';
+
+// 指令控制：registerCommand / executeCommand / attachConsole（stdin 通道）
+export type { KernelCommand, KernelCommandContext, KernelCommandHandler, KernelCommandResult } from './kernel/commands.js';
+export { formatKernelStatus } from './kernel/commands.js';
+
+// 蹲饼底层开关（内核已封装；需要直接操作被动蹲饼时可用）
+export { setFetchEnabled, isFetchEnabled } from './business/passive-fetch.js';

@@ -222,6 +222,28 @@ const MAX_COLLECTED = 1000;
 const attached = new WeakSet<object>();
 
 /**
+ * 蹲饼总开关（供内核独立开关「蹲饼」功能）。
+ * - true（默认）：监听器正常解析 / 投递动态 / 触发补全与点击获取；
+ * - false：监听器保留但直接返回，不再解析/投递/触发（页面与增量基线保持不变，
+ *   重新开启后继续用同一基线做增量，不会把关闭期间的历史动态误判为新动态重复投递）。
+ */
+let fetchEnabled = true;
+
+/** 打开/关闭蹲饼（内核切换用；默认开启，保持各独立启动入口原有行为） */
+export function setFetchEnabled(enabled: boolean): void {
+  if (fetchEnabled === enabled) {
+    return;
+  }
+  fetchEnabled = enabled;
+  logDyn(enabled ? '🥞 蹲饼已开启' : '🥞 蹲饼已关闭（监听保留，不再解析/投递动态）');
+}
+
+/** 蹲饼当前是否开启 */
+export function isFetchEnabled(): boolean {
+  return fetchEnabled;
+}
+
+/**
  * 上次已获取最新动态（统一的增量基线，持久化单个值跨重启，永不膨胀）。
  * 记录 dynId + pubTs（发布时间）：
  * - dynId 用于精确匹配（基线未删除时）
@@ -668,6 +690,9 @@ async function reopenDynamicPage(page: Page): Promise<void> {
  * - Login 不会触发被动蹲饼（登录是打开浏览器→主页→登录→动态页的前置流程之一，动态页监听未就绪）
  */
 async function runFetchSession(page: Page, updateNum: number): Promise<void> {
+  if (!fetchEnabled) {
+    return; // 蹲饼已关闭：不再触发点击获取 / 滚动补全
+  }
   if (sessionActive) {
     return; // 上一次蹲饼获取进行中，忽略
   }
@@ -787,6 +812,9 @@ export function attachDynamicFeedListener(page: Page): void {
   }
   attached.add(page);
   page.on('response', (response) => {
+    if (!fetchEnabled) {
+      return; // 蹲饼已关闭：监听保留但不解析/不投递/不触发（重开后沿用同一增量基线）
+    }
     const url = response.url();
     if (!url.startsWith(FEED_API_PREFIX)) {
       return;

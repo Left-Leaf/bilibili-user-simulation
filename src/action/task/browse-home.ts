@@ -104,7 +104,7 @@ export class BrowseHomeTask extends BaseTask {
       const initialDwell =
         new DwellTimeSampler(DEFAULT_BEHAVIOR_CONFIG.behavior.dwellTime).sample('home_feed') + 1500 + Math.random() * 1500;
       if (!(await interruptibleDwell(initialDwell))) {
-        this.log('⚡ 被动蹲饼触发，中断浏览主页');
+        this.log('⚡ 收到让位信号（蹲饼中断 / 停止请求），中断浏览主页');
         return { success: true, data: { interrupted: true }, nextState: MainState.HOME_FEED };
       }
 
@@ -114,7 +114,7 @@ export class BrowseHomeTask extends BaseTask {
         await new ScrollBehavior(mousePos, distance).execute(context);
         const screenDwell = new DwellTimeSampler(DEFAULT_BEHAVIOR_CONFIG.behavior.dwellTime).sample('home_feed');
         if (!(await interruptibleDwell(screenDwell))) {
-          this.log('⚡ 被动蹲饼触发，中断浏览主页');
+          this.log('⚡ 收到让位信号（蹲饼中断 / 停止请求），中断浏览主页');
           return {
             success: true,
             data: { interrupted: true, browseDepth: depth },

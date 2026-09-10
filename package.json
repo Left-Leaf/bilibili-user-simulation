@@ -8,6 +8,8 @@
   "scripts": {
     "start:headless": "npx --node-options=\"--experimental-specifier-resolution=node --no-warnings --loader ts-node/esm\" ts-node --project tsconfig.json run/run-headless.ts",
     "start:headed": "npx --node-options=\"--experimental-specifier-resolution=node --no-warnings --loader ts-node/esm\" ts-node --project tsconfig.json run/run-headed.ts",
+    "start:kernel": "npx --node-options=\"--experimental-specifier-resolution=node --no-warnings --loader ts-node/esm\" ts-node --project tsconfig.json run/run-kernel.ts",
+    "sample:module": "npx --node-options=\"--experimental-specifier-resolution=node --no-warnings --loader ts-node/esm\" ts-node --project tsconfig.json run/example-module.ts",
     "typecheck": "tsc --noEmit --skipLibCheck"
   },
   "dependencies": {

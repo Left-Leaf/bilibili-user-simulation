@@ -1,0 +1,22 @@
+/**
+ * 内核模块导出：全局静态单一实例 `SimulationKernel`。
+ *
+ * 详见 `kernel.ts` 顶部说明（初始化 → 独立开关蹲饼 / 模拟行为）。
+ */
+export { SimulationKernel, kernel } from './kernel.js';
+export type {
+  KernelInitializeOptions,
+  KernelFetchOptions,
+  KernelStopFetchOptions,
+  KernelStatus,
+  KernelConsoleOptions,
+} from './kernel.js';
+
+// 指令系统（扩展自定义指令时用到的类型与状态文本格式化）
+export { registerBuiltinCommands, formatKernelStatus } from './commands.js';
+export type {
+  KernelCommand,
+  KernelCommandContext,
+  KernelCommandHandler,
+  KernelCommandResult,
+} from './commands.js';

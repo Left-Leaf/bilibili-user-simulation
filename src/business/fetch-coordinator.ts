@@ -21,6 +21,11 @@ export const fetchCoordinator = {
   paused: false,
   /** 中断当前任务请求（BrowseDynamic 停留循环检测到后提前结束） */
   interruptRequested: false,
+  /**
+   * 内核「停止模拟行为」请求（sim off）：与蹲饼的 interruptRequested **独立**（互不清除），
+   * 供持续式任务在分片检查点感知 → 结束当前任务并收尾，使整个模拟在最后一个任务结束后停止。
+   */
+  stopRequested: false,
 
   /** executor 每个任务边界调用：暂停期间阻塞，直到 resume */
   async waitIfPaused(): Promise<void> {
@@ -47,6 +52,16 @@ export const fetchCoordinator = {
   /** 清除中断请求 */
   clearInterrupt(): void {
     fetchCoordinator.interruptRequested = false;
+  },
+
+  /** 请求停止模拟行为（内核 sim off 调用；持续式任务在检查点感知后收尾结束当前任务） */
+  requestStop(): void {
+    fetchCoordinator.stopRequested = true;
+  },
+
+  /** 清除停止请求（内核在模拟彻底结束后调用，供下次 startSimulation 使用） */
+  clearStop(): void {
+    fetchCoordinator.stopRequested = false;
   },
 };
 

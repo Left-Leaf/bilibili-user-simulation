@@ -11,6 +11,7 @@ import {
   getPlayerPlaybackState,
   isVideoPageUrl,
 } from '../../utils/bilibili-dom';
+import { fetchCoordinator } from '../../business/fetch-coordinator';
 
 /** 观看视频任务的输入：由生成器（决策层）在拿到 OpenVideo 结果后提供。 */
 export interface WatchVideoInput {
@@ -120,6 +121,17 @@ export class WatchVideoTask extends BaseTask {
       const watchStart = Date.now();
       let i = 0;
       while (Date.now() - watchStart < durationMs) {
+        // 停止请求（内核 sim off）：持续式观看任务在此检查点收尾结束（否则要等整段视频看完）。
+        // 任务结束后生成器不再产生新任务 → 整个模拟在最后一个任务完成后停止。
+        if (fetchCoordinator.stopRequested) {
+          this.log('⏹️ 收到停止请求，结束观看并收尾');
+          return {
+            success: false,
+            interrupted: true,
+            reason: 'stop-requested',
+            data: { durationMs: Math.round(Date.now() - watchStart), stopRequested: true },
+          };
+        }
         await new SleepBehavior(checkInterval).execute(context);
         i++;
         // 同步播放进度状态：每次检查都从播放器读取当前已播放时长 / 总时长

@@ -128,7 +128,7 @@ export class BrowseDynamicTask extends BaseTask {
       const initialLookMs = Math.min(totalDwellMs * 0.35, 4500);
       this.log(`👀 先停留浏览 ${(initialLookMs / 1000).toFixed(1)}s…`);
       if (!(await this.interruptibleDwell(context, initialLookMs))) {
-        this.log('⚡ 被动蹲饼触发，中断浏览动态页');
+        this.log('⚡ 收到让位信号（蹲饼中断 / 停止请求），中断浏览动态页');
         return {
           success: true,
           data: { url: context.page!.url(), interrupted: true, steps: steps.length },
@@ -144,7 +144,7 @@ export class BrowseDynamicTask extends BaseTask {
         await new ScrollBehavior(mousePos, distance).execute(context);
         this.log(`👀 停留浏览 ${(perScreenMs / 1000).toFixed(1)}s…`);
         if (!(await this.interruptibleDwell(context, perScreenMs))) {
-          this.log('⚡ 被动蹲饼触发，中断浏览动态页');
+          this.log('⚡ 收到让位信号（蹲饼中断 / 停止请求），中断浏览动态页');
           return {
             success: true,
             data: { url: context.page!.url(), interrupted: true, browseDepth: depth, steps: steps.length },
@@ -184,19 +184,20 @@ export class BrowseDynamicTask extends BaseTask {
     }
   }
 
-  /** 可中断停留：分片等待并检查被动蹲饼中断信号；被中断返回 false（BrowseDynamic 提前结束让位） */
+  /** 可中断停留：分片等待并检查让位信号（蹲饼中断 / 内核停止请求）；被中断返回 false（提前结束收尾） */
   private async interruptibleDwell(context: TaskContext, ms: number): Promise<boolean> {
     const CHUNK = 400;
+    const shouldYield = (): boolean => fetchCoordinator.interruptRequested || fetchCoordinator.stopRequested;
     let remain = ms;
     while (remain > 0) {
-      if (fetchCoordinator.interruptRequested) {
+      if (shouldYield()) {
         return false;
       }
       const step = Math.min(CHUNK, remain);
       await this.sleepReal(step);
       remain -= step;
     }
-    return !fetchCoordinator.interruptRequested;
+    return !shouldYield();
   }
 
   /** 在所有标签页中查找动态页（t.bilibili.com，动态入口 target=_blank 打开新标签页） */

@@ -5,18 +5,20 @@
 - `src/persona/` ① 人格管理（任务概率调控：transition 马尔科夫 / circadian / loader）
 - `src/action/` ② 行为执行（生成器 PersonaDrivenGenerator + 执行器 TaskExecutor + 14 任务）
 - `src/business/` ③ 蹲饼分发（passive-fetch 被动监听动态流 / fetch-coordinator 协调 / record 录屏）
+- `src/kernel/` ④ **内核（SimulationKernel）**：全局静态单例，初始化（开浏览器并登录）后按需**独立开关**模拟行为 / 蹲饼，并支持指令控制
 
 运行语义：真实时间（无加速）· 无时长上限 · 无限循环直到 Ctrl+C。运行数据（人格/登录态/logs/配置）
 都在本仓库内，任意位置启动均有效（包根相对解析，不依赖宿主 cwd）。
 
-## 两种使用方法
+## 三种使用方法
 
 ### 1) example：独立启动（包内自带入口）
 
 ```bash
 npm install
-npm run start:headless   # 无头后台（-- [人格id]，默认 data/personas/ak-night-worker.json）
-npm run start:headed     # 有头观察
+npm run start:headless   # 全自动引擎·无头后台（-- [人格id]，默认 data/personas/ak-night-worker.json）
+npm run start:headed     # 全自动引擎·有头观察
+npm run start:kernel     # 内核模式·初始化后由指令开关功能（见下「内核」）
 npm run typecheck
 ```
 
@@ -26,7 +28,40 @@ npm run typecheck
   登录成功后才开始后续流程（蹲饼目标对齐 → 动态页 → 模拟行为）；退出登录/等待重登时可用 `login` 指令重新扫码。
 - 引擎运行时通过 **stdin** 接收指令（见下「运行时指令」）：`login` `logout` `reload` `online` `record on|off` `status` `help`。
 
-### 2) 模块：被主项目 import 后由主项目启动
+### 2) 内核：初始化后按需独立开关（推荐给主项目）
+
+```ts
+import { kernel } from 'bilibili-user-simulation'; // 全局静态单例（SimulationKernel.getInstance() 同义）
+
+await kernel.initialize({ headless: true, personaId: 'ak-night-worker' }); // ① 打开浏览器并登录（幂等；登录态有效免扫码）
+await kernel.startFetch();        // ② 打开蹲饼（可独立开关）
+await kernel.startSimulation();   // ② 打开模拟行为（可独立开关）
+...
+await kernel.stopSimulation();    // 只关模拟行为（蹲饼继续跑）
+await kernel.stopFetch();         // 只关蹲饼（浏览器保持）
+await kernel.shutdown();          // 全部关闭 + 退出浏览器
+```
+
+| 方法 | 作用 |
+| --- | --- |
+| `initialize(options)` | 打开浏览器并确保登录；**不启动任何功能**（人格三选一：`personaId` / `personaFile` / `persona`） |
+| `startSimulation()` / `stopSimulation()` | 打开 / **彻底结束**模拟行为（任务流） |
+| `startFetch()` / `stopFetch([closePage])` | 打开 / 关闭蹲饼（动态流捕获） |
+| `login()` | 确保登录（未登录则扫码） |
+| `shutdown()` | 停止全部 + 关闭浏览器 |
+| `getStatus()` / `getDynamics(n)` | 状态快照 / 已捕获动态 |
+| `executeCommand(line)` / `attachConsole(opts)` | 指令控制（见下「内核指令」） |
+
+**`stopSimulation()` 的停止流程**（不中断执行器，只阻塞生成器）：
+
+1. **阻塞生成器** → 执行器不再生成下一个任务；
+2. **持续式中断** → 浏览类（`BrowseHome` / `BrowseProfile` / `BrowseDynamic`）与观看 / 休息类任务在检查点**收尾**后提前结束；非持续式短任务（点赞 / 搜索 / 开关视频等）等它自然做完；
+3. 等执行器跑完最后一个任务；
+4. **清理页面** —— 蹲饼未开启：页面全部关闭（浏览器保持打开，下次 `startSimulation()` 自动重建主页）；蹲饼已开启：只保留蹲饼用的动态页。
+
+> 模拟行为只有「从零打开」与「彻底结束」两种状态，**没有暂停态**。
+
+### 3) 模块：被主项目 import 后由主项目启动（全自动引擎）
 
 ```ts
 import { runPersonaEngine } from 'bilibili-user-simulation'; // 库入口 = src/index.ts
@@ -47,6 +82,8 @@ await runPersonaEngine({
 
 ## 运行时指令（stdin）
 
+### 全自动引擎指令（`runPersonaEngine`：run-headless / run-headed）
+
 引擎运行中在**终端（stdin）输入一行指令**即可控制（模块接入时复用宿主进程的 stdin）。
 
 | 指令 | 名称 | 说明 |
@@ -60,6 +97,22 @@ await runPersonaEngine({
 | `help` | 帮助 | 列出全部可用指令。 |
 
 > Ctrl+C：优雅关闭浏览器并退出（避免 Chrome 孤儿进程锁住 `puppeteer-browser/data`）。
+
+### 内核指令（`SimulationKernel`）
+
+内核模式下用同一套指令系统：`kernel.attachConsole()` 挂 stdin（`run-kernel` 即此用法），也可
+`await kernel.executeCommand('sim off')` 从 IPC / HTTP / 宿主代码下发，或用 `kernel.registerCommand()` 扩展指令。
+
+| 指令 | 说明 |
+| --- | --- |
+| `sim on` | **从零打开**模拟行为（重置生成器状态机） |
+| `sim off` | **彻底结束**模拟行为（阻塞生成器 → 持续式任务收尾 → 清理页面） |
+| `fetch on` | 打开蹲饼（目标 UP 对齐 → 动态页 → 初次获取 → 守护） |
+| `fetch off [close]` | 关闭蹲饼（保留监听与增量基线，便于快速重开；加 `close` 同时关闭动态页标签） |
+| `login` | 确保登录（未登录则扫码） |
+| `status` | 打印内核状态快照（初始化 / 登录态 / 两个功能 / 当前页面 / 动态数） |
+| `dynamics [n]` | 查看最近捕获的动态（默认 5 条） |
+| `help` | 列出全部可用指令 |
 
 ## 人格配置字段说明（data/personas/*.json）
 
@@ -121,9 +174,10 @@ await runPersonaEngine({
 ## 目录
 
 ```
-src/    库源码（index.ts = 库入口）
-run/    example 启动入口：run-headless/run-headed（独立启动）、example-module（模块用法示例）、
-        persona-engine.ts（引擎实现，双模式共用）
+src/      库源码（index.ts = 库入口）
+src/kernel/   内核（SimulationKernel 单例 + commands 指令系统）
+run/      example 启动入口：run-headless/run-headed（全自动引擎）、run-kernel（内核模式·指令控制）、
+          example-module（模块用法示例）、persona-engine.ts（引擎实现，双模式共用）
 data/personas/  内置人格（ak-night-worker.json）
 config-app.json5  被动蹲饼外发/录屏配置（example 模式读）
 ```

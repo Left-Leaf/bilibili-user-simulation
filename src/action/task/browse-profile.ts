@@ -127,7 +127,7 @@ export class BrowseProfileTask extends BaseTask {
       const initialDwell =
         new DwellTimeSampler(DEFAULT_BEHAVIOR_CONFIG.behavior.dwellTime).sample('user_profile') + 1500 + Math.random() * 1500;
       if (!(await interruptibleDwell(initialDwell))) {
-        this.log('⚡ 被动蹲饼触发，中断逛 UP 主页');
+        this.log('⚡ 收到让位信号（蹲饼中断 / 停止请求），中断逛 UP 主页');
         return {
           success: true,
           data: { interrupted: true, entered: true, upName: this.input.upName, steps: steps.length },
@@ -142,7 +142,7 @@ export class BrowseProfileTask extends BaseTask {
         await new ScrollBehavior(mousePos, distance).execute(context);
         const screenDwell = new DwellTimeSampler(DEFAULT_BEHAVIOR_CONFIG.behavior.dwellTime).sample('user_profile');
         if (!(await interruptibleDwell(screenDwell))) {
-          this.log('⚡ 被动蹲饼触发，中断逛 UP 主页');
+          this.log('⚡ 收到让位信号（蹲饼中断 / 停止请求），中断逛 UP 主页');
           return {
             success: true,
             data: { interrupted: true, entered: true, upName: this.input.upName, browseDepth: depth, steps: steps.length },

@@ -2,6 +2,7 @@ import { BaseTask, TaskResult } from './base';
 import type { TaskContext } from '../execute/context';
 import { MainState } from '../engine/state';
 import { SleepBehavior, CloseBrowserBehavior } from '../behavior';
+import { fetchCoordinator } from '../../business/fetch-coordinator';
 
 /** 休息/暂停任务的输入：由人格（决策层）在执行时提供 */
 export interface RestTaskInput {
@@ -75,6 +76,16 @@ export class RestTask extends BaseTask {
       let elapsed = 0;
       let nextPrintAt = 60 * 1000;
       while (elapsed < durationMs) {
+        // 停止请求（内核 sim off）：持续式休息任务在此检查点收尾结束，让整个模拟尽快停止
+        if (fetchCoordinator.stopRequested) {
+          this.log('⏹️ 收到停止请求，结束休息并收尾');
+          return {
+            success: false,
+            interrupted: true,
+            reason: 'stop-requested',
+            data: { durationMs, interrupted: true, closedBrowser: false, elapsed },
+          };
+        }
         // 强制上线：立即结束短休息、不关浏览器、继续上线
         if (context.state.get('forceOnline') === true) {
           context.state.set('forceOnline', false);
