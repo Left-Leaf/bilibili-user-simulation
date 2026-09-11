@@ -192,7 +192,8 @@ export class LoginTask extends BaseTask {
       if (context.page && (await isLoggedInOnPage(context.page))) {
         this.log('✅ 已经登录，跳过登录流程');
         this.setState(context, 'alreadyLoggedIn', true);
-        return this.finalizeResult(TaskStatus.SUCCESS, { loginMethod: 'skipped' }, MainState.LOGGED_IN);
+        this.setNextState(MainState.LOGGED_IN);
+        return this.finalizeResult(TaskStatus.SUCCESS, { loginMethod: 'skipped' });
       }
 
       // 解析登录入口坐标（含可见性遍历/落点/滚动；深层懒加载兜底）
@@ -235,7 +236,7 @@ export class LoginTask extends BaseTask {
         await this.sleep(2000);
 
         if (page.isClosed()) {
-          return this.finalizeResult(TaskStatus.INTERRUPTED, undefined, undefined, undefined, 'browser closed by user');
+          return this.finalizeResult(TaskStatus.INTERRUPTED, undefined, undefined, 'browser closed by user');
         }
 
         if (await isLoggedInOnPage(page)) {
@@ -258,7 +259,8 @@ export class LoginTask extends BaseTask {
           this.setState(context, 'isLoggedIn', true);
           this.setState(context, 'userInfo', userInfo);
 
-          return this.finalizeResult(TaskStatus.SUCCESS, { loginMethod: 'qrcode', userInfo, steps: steps.length }, MainState.LOGGED_IN);
+          this.setNextState(MainState.LOGGED_IN);
+          return this.finalizeResult(TaskStatus.SUCCESS, { loginMethod: 'qrcode', userInfo, steps: steps.length });
         }
 
         // 二维码过期/换新探测（~8s 一次，避免过频）
@@ -296,9 +298,9 @@ export class LoginTask extends BaseTask {
         }
       }
 
-      return this.finalizeResult(TaskStatus.FAILURE, undefined, undefined, '登录超时，请在 3 分钟内扫码');
+      return this.finalizeResult(TaskStatus.FAILURE, undefined, '登录超时，请在 3 分钟内扫码');
     } catch (error) {
-      return this.finalizeResult(TaskStatus.FAILURE, undefined, undefined, `登录失败: ${(error as Error).message}`);
+      return this.finalizeResult(TaskStatus.FAILURE, undefined, `登录失败: ${(error as Error).message}`);
     }
   }
 }

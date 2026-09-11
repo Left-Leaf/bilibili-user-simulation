@@ -68,7 +68,8 @@ export class LogoutTask extends BaseTask {
       if (!context.page || (await isLoggedInOnPage(context.page)) === false) {
         this.log('⚠️ 当前未登录，无需退出');
         this.setState(context, 'isLoggedIn', false);
-        return this.finalizeResult(TaskStatus.SUCCESS, { logoutMethod: 'skipped' }, MainState.LOGGED_IN);
+        this.setNextState(MainState.LOGGED_IN);
+        return this.finalizeResult(TaskStatus.SUCCESS, { logoutMethod: 'skipped' });
       }
 
       // 行为2：关闭全部标签页，只保留 B 站主页，然后在主页完成退出操作
@@ -154,9 +155,10 @@ export class LogoutTask extends BaseTask {
 
       this.log('✅ 已退出登录（SESSDATA 已清除，任务生成已停止）');
       this.setState(context, 'isLoggedIn', false);
-      return this.finalizeResult(TaskStatus.SUCCESS, { logoutMethod: 'ui' }, MainState.LOGGED_IN);
+      this.setNextState(MainState.LOGGED_IN);
+      return this.finalizeResult(TaskStatus.SUCCESS, { logoutMethod: 'ui' });
     } catch (error) {
-      return this.finalizeResult(TaskStatus.FAILURE, undefined, undefined, `退出登录失败: ${(error as Error).message}`);
+      return this.finalizeResult(TaskStatus.FAILURE, undefined, `退出登录失败: ${(error as Error).message}`);
     }
   }
 }

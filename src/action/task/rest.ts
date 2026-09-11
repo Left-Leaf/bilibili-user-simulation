@@ -1,4 +1,4 @@
-import { BaseTask, type TaskController, type TaskResult } from './base';
+import { BaseTask, type TaskController } from './base';
 import type { TaskContext } from '../execute/context';
 import { MainState } from '../engine/state';
 import { CloseBrowserBehavior } from '../behavior';

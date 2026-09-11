@@ -339,10 +339,13 @@ export abstract class BaseTask implements Task {
     context.state.set(key, value);
   }
 
+  /**
+   * 构造「结束处理」前的执行结果（编排类任务用）。
+   * 只负责状态码/数据/错误；**后一个状态请用 `setNextState()` 声明**，由 onEnd 统一生成。
+   */
   protected finalizeResult(
     status: TaskStatus,
     data?: Record<string, unknown>,
-    nextState?: string,
     error?: string,
     reason?: string
   ): TaskResult {
@@ -350,7 +353,6 @@ export abstract class BaseTask implements Task {
       status,
       success: status === TaskStatus.SUCCESS,
       data,
-      nextState,
       error,
       reason,
       interrupted: status === TaskStatus.INTERRUPTED || status === TaskStatus.TERMINATED,
