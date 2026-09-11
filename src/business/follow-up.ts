@@ -79,8 +79,14 @@ export interface FollowUpResult {
   detail?: string;
 }
 
+/** 关注按钮/页头就绪信号：出现任一即可继续（避免在后台标签页上读到未渲染的空内容） */
+const PROFILE_READY_SELECTOR = [...FOLLOW_SELECTORS, '#h-name', '.nickname'].join(', ');
+
 /**
  * 在指定页面上关注某个 UP（幂等：已关注直接返回，不会重复点击）。
+ *
+ * 临时标签页默认是**后台页**，渲染/懒加载慢——仅靠固定 sleep 会读到空的昵称，
+ * 因此先 `bringToFront()`（保证渲染）→ 等页头/关注按钮就绪 → 再读 UP 信息（含标题兜底）。
  *
  * @param page  执行本次操作的页面（内核传入临时标签页；宿主也可传入自己的页面）
  * @param target 关注目标（`uid` 必填）
@@ -94,8 +100,12 @@ export async function followUpOnPage(page: Page, target: FollowUpTarget): Promis
   });
 
   try {
+    // 切前台：后台标签页的 SPA 往往不渲染（昵称读不到），先激活再导航
+    await page.bringToFront().catch(() => {});
     await page.goto(`https://space.bilibili.com/${target.uid}`, { waitUntil: 'domcontentloaded', timeout: 30_000 });
-    await sleep(1500 + Math.random() * 1200);
+    // 等页头/关注按钮渲染（比固定 sleep 可靠）；超时不报错，后续自行降级
+    await page.waitForSelector(PROFILE_READY_SELECTOR, { timeout: 8_000 }).catch(() => null);
+    await sleep(800 + Math.random() * 700);
     profile = await extractUpProfileInfo(page).catch(() => null);
 
     const before = await readFollowState(page);

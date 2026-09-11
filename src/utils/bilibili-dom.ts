@@ -531,13 +531,24 @@ export interface UpProfileInfo {
   name: string;
 }
 
+/** UP 名候选选择器：新版空间页 #h-name / .nickname；兼容旧版与视频页 .up-name */
+const UP_NAME_SELECTORS = ['#h-name', '.nickname', 'h1.nickname', '.user-name', '.up-name'];
+
 /**
  * 提取 UP 主页（space.bilibili.com）的 uid 与名称。
  * 只读 DOM、不发网络请求；两者都未取到返回 null。
+ *
+ * 名称取值链：`#h-name` / `.nickname` / … → **页面标题**（「XXX的个人空间…」）兜底。
+ * `waitMs > 0` 时，若首次没读到名称会 `waitForSelector` 等昵称元素渲染后重读（后台标签页
+ * 渲染/懒加载慢，仅靠固定 sleep 容易读到空串）。
  */
-export async function extractUpProfileInfo(page: Page): Promise<UpProfileInfo | null> {
-  try {
-    const info = await page.evaluate(() => {
+export async function extractUpProfileInfo(
+  page: Page,
+  options: { waitMs?: number } = {}
+): Promise<UpProfileInfo | null> {
+  const waitMs = options.waitMs ?? 3000;
+  const read = (): Promise<UpProfileInfo> =>
+    page.evaluate((nameSelectors) => {
       const pickText = (sels: string[]): string => {
         for (const sel of sels) {
           const t = document.querySelector(sel)?.textContent?.trim();
@@ -552,12 +563,26 @@ export async function extractUpProfileInfo(page: Page): Promise<UpProfileInfo | 
         Array.from(document.querySelectorAll<HTMLAnchorElement>('a[href*="space.bilibili.com/"]'))
           .map((a) => a.href.match(/space\.bilibili\.com\/(\d+)/)?.[1] ?? '')
           .find((v) => !!v) ?? '';
+      // 标题兜底：「明日方舟的个人空间-哔哩哔哩视频」/「xxx的个人空间_哔哩哔哩_bilibili」
+      const nameFromTitle = document.title.match(/^\s*(.+?)的个人空间/)?.[1]?.trim() ?? '';
       return {
         uid: uidFromUrl || uidFromLink,
-        // UP 名：新版空间页 #h-name / .nickname；兼容旧版与视频页 .up-name
-        name: pickText(['#h-name', '.nickname', 'h1.nickname', '.user-name', '.up-name']),
+        name: pickText(nameSelectors) || nameFromTitle,
       };
-    });
+    }, UP_NAME_SELECTORS);
+
+  try {
+    let info = await read();
+
+    // 名字没读到（多为后台标签页还没渲染出昵称）→ 等元素出现后重读一次
+    if (!info.name && waitMs > 0) {
+      await page.waitForSelector(UP_NAME_SELECTORS.join(', '), { timeout: waitMs }).catch(() => null);
+      const retry = await read().catch(() => null);
+      if (retry?.name) {
+        info = retry;
+      }
+    }
+
     if (!info.uid && !info.name) {
       return null;
     }

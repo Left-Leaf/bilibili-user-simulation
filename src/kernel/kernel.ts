@@ -599,6 +599,11 @@ export class SimulationKernel {
           this.log(`🔧 主操作页已失效，已切换到: ${fallback.url().slice(0, 60) || '(新标签页)'}`);
         }
       }
+      // 关注期间临时页被切到前台（保证渲染）→ 结束后把主操作页切回前台，
+      // 避免正在运行的持续性任务在后台页上做滚动/点击（后台滚动不触发加载、点击不可靠）
+      if (this.ctx?.page && !this.ctx.page.isClosed()) {
+        await this.ctx.page.bringToFront().catch(() => {});
+      }
       if (holdTasks) {
         fetchCoordinator.resume();
       }

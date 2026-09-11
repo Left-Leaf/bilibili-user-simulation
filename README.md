@@ -149,8 +149,10 @@ await runPersonaEngine({
 - 模拟行为运行时，仅在这几秒内**暂停「生成新任务」**（防止恰好有「关闭视频标签 / 切换主操作页」
   的任务与本次操作竞争标签页）；传 `no-hold`（或 `holdTasks: false`）则完全不干预；
 - **幂等**：已关注直接返回 `status: 'followed'`，不会重复点击；
-- **返回 UP 的 uid 与名称**：进主页后从页面**实际读取**（`uid` 取 URL，`name` 取 `#h-name` / `.nickname`），
-  uid 读取失败时回退为传入值；失败返回 `status: 'failed'` + `detail`（如 uid 非法、按钮不可用）。
+- **返回 UP 的 uid 与名称**：进主页后从页面**实际读取**（`uid` 取 URL，`name` 取 `#h-name` / `.nickname`，
+  缺失时用页面标题「XXX的个人空间…」兜底），uid 读取失败时回退为传入值；失败返回 `status: 'failed'` + `detail`（如 uid 非法、按钮不可用）。
+  - 临时标签页默认在**后台**、SPA 渲染慢，仅靠固定等待会读到空名称 → 库侧会先 `bringToFront()`
+    切到前台、`waitForSelector` 等页头/关注按钮就绪，再读信息；读完后把主操作页切回前台。
 - 仅支持按 **uid**（纯数字）关注；UP 名称无需传入，由程序从主页读取后返回。
 
 ```ts
