@@ -105,6 +105,17 @@ await runPersonaEngine({
 - 也可直接 `setDynamicListener(fn)` / `loadPersonaFromFile(path)`（见 `src/index.ts` 导出）。
 - 可运行示例：`ts-node run/example-module.ts <人格JSON路径>`。
 
+### 运行器兼容（tsx / esbuild `keepNames`）
+
+tsx 等基于 esbuild 且开启 `keepNames` 的运行器，会把回调里的**具名函数绑定**改写成
+`const f = __name((…) => …, "f")`；而 `page.evaluate(fn)` 是把函数**序列化成字符串**送进浏览器执行的，
+页面上下文里没有 `__name` → 回调抛 `ReferenceError: __name is not defined` → 被各处的 try/catch 吞掉，
+表现为「读不到数据」（例如关注时读到空名称、DOM 提取返回 null）。
+
+库已在**浏览器启动时给每个页面注入同名 shim**（`src/utils/page-runtime.ts`：`evaluateOnNewDocument`
++ `evaluate` + `targetcreated` 监听，纯字符串下发、幂等），因此 tsx / ts-node / 编译产物都能正常 `evaluate`，
+使用者无需额外处理。新增标签页会自动覆盖；创建页面后若立即 `evaluate`，请先 `installPageRuntimeShim(page)`。
+
 ## 运行时指令（stdin）
 
 ### 全自动引擎指令（`runPersonaEngine`：run-headless / run-headed）

@@ -27,6 +27,7 @@ import type { TaskContext } from '../action/execute/context';
 import { fetchCoordinator, TRIGGER_TASKS, SUSTAINED_TASKS } from './fetch-coordinator';
 import { startFetchRecording, stopFetchRecording, type FetchRecording } from './record-fetch-video';
 import { HumanMouse } from '../action/engine/human-mouse';
+import { installPageRuntimeShim } from '../utils/page-runtime';
 import { packagePath } from '../utils/paths';
 
 /**
@@ -1036,6 +1037,8 @@ export async function ensureDynamicPage(context: TaskContext): Promise<Page | nu
   // 无 → 新开一个动态页标签（后台常驻；context.page 保持不变）
   try {
     const page = await browser.newPage();
+    // 动态页长久驻留且后续大量 evaluate → 先注入运行时 shim（防 __name 未定义）
+    await installPageRuntimeShim(page);
     attachDynamicFeedListener(page);
     await page.goto('https://t.bilibili.com/', { waitUntil: 'domcontentloaded', timeout: 30_000 }).catch(() => {});
     // 校验确为动态页（防跳转/加载失败时堆积空白标签）；失败则关闭并返回 null 供下次重试

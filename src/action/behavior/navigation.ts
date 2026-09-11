@@ -1,6 +1,7 @@
 import type { Browser } from 'puppeteer-core';
 import { stealthPuppeteer } from '../engine/stealth';
 import type { TaskContext } from '../execute/context';
+import { attachPageRuntimeShim } from '../../utils/page-runtime';
 import { BaseBehavior, type BehaviorResult } from './types';
 
 /** 打开浏览器（原子行为）：用 stealth puppeteer 消除自动化硬指纹（navigator.webdriver 等） */
@@ -17,6 +18,9 @@ export class OpenBrowserBehavior extends BaseBehavior {
         ...this.options,
       })) as unknown as Browser;
       context.browser = browser;
+      // 注入页面运行时 shim（tsx/esbuild keepNames 会在 evaluate 回调里注入 __name，
+      // 而序列化到浏览器执行的字符串里没有它 → 回调报错被吞、表现为「读不到数据」）
+      await attachPageRuntimeShim(browser);
       const pages = await browser.pages();
       context.page = pages.length > 0 ? pages[0] : await browser.newPage();
       return this.ok({ headless: this.options?.headless ?? false });

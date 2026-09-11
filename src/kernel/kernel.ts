@@ -58,6 +58,7 @@ import type { BiliDynamicItem, DynamicListener, FetchReportConfig } from '../bus
 import { fetchCoordinator } from '../business/fetch-coordinator.js';
 import { followUpOnPage, type FollowUpResult, type FollowUpTarget } from '../business/follow-up.js';
 import { isVideoPageUrl } from '../utils/bilibili-dom.js';
+import { installPageRuntimeShim } from '../utils/page-runtime.js';
 import { packagePath } from '../utils/paths.js';
 import type { Browser, Page } from 'puppeteer-core';
 import { registerBuiltinCommands, type KernelCommand, type KernelCommandContext, type KernelCommandResult } from './commands.js';
@@ -576,6 +577,8 @@ export class SimulationKernel {
       }
       return { uid, name: '', status: 'failed', detail: '无法打开临时标签页' };
     }
+    // 新页面先注入运行时 shim（evaluate 回调里可能含 tsx/esbuild 注入的 __name）
+    await installPageRuntimeShim(page);
 
     try {
       this.log(`➕ 主动关注 UP（uid=${uid}，临时标签页操作）…`);
