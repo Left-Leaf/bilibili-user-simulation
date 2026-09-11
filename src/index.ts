@@ -22,7 +22,9 @@ export type { PersonaRunOptions } from '../run/persona-engine.js';
 
 // 动态监听（被动蹲饼捕获出口）——模块接入方也可直接 setDynamicListener
 export { setDynamicListener } from './business/passive-fetch.js';
-export type { DynamicListener, FetchedDynamic } from './business/passive-fetch.js';
+export type { DynamicListener, BiliDynamicItem } from './business/passive-fetch.js';
+// 原始动态字段读取辅助（出口数据是 B 站原始 item，这些只负责「便捷读取」，不改数据）
+export { dynId, dynAuthor, dynPubTs, dynPubTimeText, dynText } from './business/passive-fetch.js';
 
 // 人格加载（`personaId` = 人格目录下的**文件名**；主项目可用 personaDir 指向自己的 data/personas）
 export { loadPersona, loadPersonaFromFile, listPersonas, DEFAULT_PERSONA_DIR } from './persona/loader.js';

@@ -21,6 +21,9 @@ import { TaskExecutor } from '../src/action/execute/executor.js';
 import { loadPersona, loadPersonaFromFile } from '../src/persona/loader.js';
 import { PersonaDrivenGenerator, type GeneratorControl } from '../src/action/generate/persona-generator.js';
 import {
+  dynAuthor,
+  dynPubTs,
+  dynText,
   ensureDynamicPage,
   getCollectedDynamics,
   getDynamicCount,
@@ -407,9 +410,11 @@ export async function runPersonaEngine(opts: PersonaRunOptions): Promise<void> {
     const dynCount = getDynamicCount();
     const recent = getCollectedDynamics().slice(0, 5);
     console.log(`  被动蹲饼: 已抓动态 ${dynCount} 条${dynCount > 0 ? `（最新 ${recent.length} 条）：` : '（尚无，等待动态页轮询）'}`);
-    for (const d of recent) {
-      const t = d.pubTimeText || (d.pubTs > 0 ? new Date(d.pubTs * 1000).toLocaleString('zh-CN', { hour12: false }) : '?');
-      console.log(`    · ${d.author || d.uid || '?'} [${t}]: ${(d.text || '(无文案)').slice(0, 40)}`);
+    for (const item of recent) {
+      const { uid, name } = dynAuthor(item);
+      const ts = dynPubTs(item);
+      const t = ts > 0 ? new Date(ts * 1000).toLocaleString('zh-CN', { hour12: false }) : '?';
+      console.log(`    · ${name || uid || '?'} [${t}]: ${(dynText(item) || '(无文案)').slice(0, 40)}`);
     }
     console.log(
       `  控制: stopped=${control.stopped} | forceLogin=${control.forceLogin} | reload=${!!control.reloadRequested} | forceOnline=${!!control.forceOnline}`

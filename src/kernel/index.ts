@@ -24,3 +24,7 @@ export type {
 // 人格目录工具（personaId = 文件名）
 export { listPersonas, loadPersona, loadPersonaFromFile, DEFAULT_PERSONA_DIR } from '../persona/loader.js';
 export type { PersonaEntry } from '../persona/loader.js';
+
+// 蹲饼数据（出口 = B 站接口原始 items）
+export { dynAuthor, dynId, dynPubTimeText, dynPubTs, dynText } from '../business/passive-fetch.js';
+export type { BiliDynamicItem, DynamicListener } from '../business/passive-fetch.js';

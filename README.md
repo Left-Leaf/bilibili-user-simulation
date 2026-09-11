@@ -51,7 +51,7 @@ await kernel.shutdown();          // 全部关闭 + 退出浏览器
 | `startFetch()` / `stopFetch([closePage])` | 打开 / 关闭蹲饼（动态流捕获） |
 | `login()` | 确保登录（未登录则扫码） |
 | `shutdown()` | 停止全部 + 关闭浏览器 |
-| `getStatus()` / `getDynamics(n)` | 状态快照 / 已捕获动态 |
+| `getStatus()` / `getDynamics(n)` | 状态快照 / 已捕获动态（B 站原始 item） |
 | `listPersonas()` / `personaDir` | 当前人格目录下全部可用人格（`personaId` = 文件名）/ 当前人格目录 |
 | `executeCommand(line)` / `attachConsole(opts)` | 指令控制（见下「内核指令」） |
 
@@ -98,8 +98,8 @@ await runPersonaEngine({
 
 - 也可用 `personaFile: '/path/to/my-persona.json'`（单个文件任意路径）或 `persona: {...}`（直接传对象）。
 
-- 注册 `onDynamics` 后即为**模块模式**：捕获的动态交给主项目回调，不再读 `config-app.json5`
-  自动外发/写本地文档（出口由主项目决定）。
+- 注册 `onDynamics` 后即为**模块模式**：捕获的动态交给主项目回调（`items` 为 **B 站接口原始对象数组**，
+  见下「蹲饼数据格式」），不再读 `config-app.json5` 自动外发/写本地文档（出口由主项目决定）。
 - 也可直接 `setDynamicListener(fn)` / `loadPersonaFromFile(path)`（见 `src/index.ts` 导出）。
 - 可运行示例：`ts-node run/example-module.ts <人格JSON路径>`。
 
@@ -134,8 +134,49 @@ await runPersonaEngine({
 | `fetch off [close]` | 关闭蹲饼（保留监听与增量基线，便于快速重开；加 `close` 同时关闭动态页标签） |
 | `login` | 确保登录（未登录则扫码） |
 | `status` | 打印内核状态快照（初始化 / 登录态 / 两个功能 / 当前页面 / 动态数） |
-| `dynamics [n]` | 查看最近捕获的动态（默认 5 条） |
+| `dynamics [n]` | 查看最近捕获的动态（默认 5 条，按原始字段展示摘要） |
 | `help` | 列出全部可用指令 |
+
+## 蹲饼数据格式（出口 = B 站接口原始数据）
+
+蹲饼的出口数据**就是 B 站动态流接口 `data.items[]` 的原始对象**（不裁剪、不改名、不合成字段），
+字段与接口完全一致，宿主可直接按 B 站字段使用：
+
+| 出口 | 数据 |
+| --- | --- |
+| `onDynamics(items, kind)` / `setDynamicListener` | `BiliDynamicItem[]`（原始对象数组；`kind: 'INIT' \| 'UPDATE'`） |
+| `fetch_report` 外发 | `{ source, kind, captured_at, count, items: BiliDynamicItem[] }` |
+| `logs/fetched-dynamics.md` | 可读 Markdown（作者 / 时间 / 正文摘要） |
+| `kernel.getDynamics(n)` / `dynamics [n]` 指令 | `BiliDynamicItem[]` |
+
+**原始 item 结构**（实测，`GET api.bilibili.com/x/polymer/web-dynamic/v1/feed/all`）：
+
+```
+id_str, type, visible, basic{}, modules{}, orig
+└─ modules
+   ├─ module_author: mid(number), name, face, jump_url, following,
+   │                 pub_ts(string 秒), pub_time(相对文本如「18分钟前」), vip{}, pendant{}, official_verify{}
+   ├─ module_dynamic
+   │   ├─ desc: null | { text, rich_text_nodes[] }
+   │   ├─ major: { type: "MAJOR_TYPE_OPUS|ARCHIVE|DRAW|LIVE_RCMD|…",
+   │   │           opus{ jump_url, title, summary{ text, rich_text_nodes[] }, pics[{ url, width, height, size }] },
+   │   │           archive{ bvid, title, cover, duration_text, stat{ play, danmaku, … } },
+   │   │           draw{ id, items[{ src, width, height, size }] }, live_rcmd{}, article{}, … }
+   │   └─ additional: { type: "ADDITIONAL_TYPE_GOODS|VOTE|COMMON|…", goods{}, vote{}, … }
+   ├─ module_stat: forward / comment / like 各自 { status, count, forbidden, disabled, silent, hidden }
+   └─ module_more / module_tag / module_interaction / module_share_view / …
+```
+
+**图片 / 视频资源不会被丢弃**：它们原样保留在 `major.*` 里（`opus.pics[].url`、`draw.items[].src`、
+`archive.bvid` / `archive.cover` 等），由宿主自行取用。
+
+**便捷读取辅助**（只读，不修改数据）：`dynId(item)`、`dynAuthor(item)`（`{ uid, name }`）、
+`dynPubTs(item)`（绝对秒时间戳）、`dynPubTimeText(item)`（接口相对文本）、
+`dynText(item, maxLen?)`（正文：`desc.text` → `major.opus.summary.text` → `archive.title` →
+`draw` 计数 → 转发原动态 → `[TYPE]` 兜底）。
+
+> 注意：接口中 `update_num`、`pub_ts` 是**字符串**；`pub_time` 是**相对时间**（如「18分钟前」），
+> 需要绝对时间请用 `dynPubTs()`。转发动态的原动态在 `orig`（结构同 item）。
 
 ## 人格配置字段说明（data/personas/*.json）
 

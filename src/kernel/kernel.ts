@@ -55,7 +55,7 @@ import {
   setFetchTargets,
   waitForInitialFetch,
 } from '../business/passive-fetch.js';
-import type { DynamicListener, FetchedDynamic, FetchReportConfig } from '../business/passive-fetch.js';
+import type { BiliDynamicItem, DynamicListener, FetchReportConfig } from '../business/passive-fetch.js';
 import { fetchCoordinator } from '../business/fetch-coordinator.js';
 import { syncFetchTargets } from '../business/target-sync.js';
 import { isVideoPageUrl } from '../utils/bilibili-dom.js';
@@ -314,8 +314,8 @@ export class SimulationKernel {
     };
   }
 
-  /** 已捕获的动态（最新在前） */
-  getDynamics(limit?: number): FetchedDynamic[] {
+  /** 已捕获的动态（**B 站原始 item**，最新在前） */
+  getDynamics(limit?: number): BiliDynamicItem[] {
     const all = getCollectedDynamics();
     return typeof limit === 'number' && limit > 0 ? all.slice(0, limit) : all;
   }

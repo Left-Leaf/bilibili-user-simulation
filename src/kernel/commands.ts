@@ -18,6 +18,7 @@
  *   help                                                  指令列表
  */
 import type { SimulationKernel } from './kernel.js';
+import { dynAuthor, dynPubTimeText, dynPubTs, dynText } from '../business/passive-fetch.js';
 
 /** 指令执行上下文 */
 export interface KernelCommandContext {
@@ -128,9 +129,11 @@ export function registerBuiltinCommands(register: (name: string, command: Kernel
       if (list.length === 0) {
         return { ok: true, output: '（暂无捕获的动态：蹲饼未开启或尚未有新动态）' };
       }
-      const lines = list.map((d) => {
-        const t = d.pubTimeText || (d.pubTs > 0 ? new Date(d.pubTs * 1000).toLocaleString('zh-CN', { hour12: false }) : '?');
-        return `  · ${d.author || d.uid || '?'} [${t}]: ${(d.text || '(无文案)').slice(0, 50)}`;
+      const lines = list.map((item) => {
+        const { uid, name } = dynAuthor(item);
+        const ts = dynPubTs(item);
+        const t = ts > 0 ? new Date(ts * 1000).toLocaleString('zh-CN', { hour12: false }) : dynPubTimeText(item) || '?';
+        return `  · [${String(item.type ?? '')}] ${name || uid || '?'} [${t}]: ${(dynText(item) || '（无文案）').slice(0, 50)}`;
       });
       return { ok: true, output: `最近 ${list.length} 条动态：\n${lines.join('\n')}` };
     },

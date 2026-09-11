@@ -14,7 +14,7 @@
  *   # 例：ts-node run/example-module.ts D:/my-app/data/personas my-persona
  */
 import path from 'node:path';
-import { listPersonas, runPersonaEngine } from '../src/index.js';
+import { dynAuthor, dynId, dynText, listPersonas, runPersonaEngine } from '../src/index.js';
 
 /** ① 人格目录（主项目自己的；省略则用包内 data/personas） */
 const personaDir = process.argv[2] ? path.resolve(process.argv[2]) : undefined;
@@ -35,11 +35,22 @@ await runPersonaEngine({
   headless: true,
   personaDir, // 指明人格目录（主项目自己的 data/personas）
   personaId, // 文件名即 personaId
-  onDynamics: (dynamics, kind) => {
-    // 注册动态监听：模块内部每次捕获到一批动态即回调（初始加载 INIT / 轮询更新 UPDATE）
-    console.log(`[模块回调] 捕获 ${dynamics.length} 条动态 (${kind})`);
-    for (const d of dynamics.slice(0, 5)) {
-      console.log(`  - ${d.author || d.uid}: ${(d.text || '(无文案)').slice(0, 40)}`);
+  onDynamics: (items, kind) => {
+    // 回调参数就是 **B 站接口的原始 items**（未裁剪、字段与接口一致）；下面的辅助函数只负责「读取」。
+    console.log(`[模块回调] 捕获 ${items.length} 条动态 (${kind})`);
+    for (const item of items.slice(0, 3)) {
+      const { uid, name } = dynAuthor(item);
+      // 直接读 B 站原始字段（示例）：图文图片列表 / 视频 BV 号 / 点赞数
+      const major = (item.modules?.module_dynamic?.major ?? {}) as {
+        opus?: { pics?: unknown[] };
+        archive?: { bvid?: string };
+      };
+      const stat = (item.modules?.module_stat ?? {}) as { like?: { count?: number } };
+      console.log(
+        `  - [${String(item.type)}] ${name || uid}｜id=${dynId(item)}｜图片 ${major.opus?.pics?.length ?? 0} 张｜` +
+          `bvid=${major.archive?.bvid ?? '-'}｜点赞 ${stat.like?.count ?? 0}`
+      );
+      console.log(`      原文: ${(dynText(item) || '（无文案）').slice(0, 40)}`);
     }
   },
 });

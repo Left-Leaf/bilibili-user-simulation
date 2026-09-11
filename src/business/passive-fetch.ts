@@ -25,24 +25,109 @@ import { startFetchRecording, stopFetchRecording, type FetchRecording } from './
 import { HumanMouse } from '../action/engine/human-mouse';
 import { packagePath } from '../utils/paths';
 
-/** 被动蹲到的一条动态 */
-export interface FetchedDynamic {
+/**
+ * B 站动态流接口返回的**单条动态**（原样，字段与接口一致，不做任何裁剪/改名）。
+ *
+ * 出口数据 = 原始 `items` 数组，宿主可直接按 B 站字段使用（`id_str` / `type` / `basic` /
+ * `modules.module_author` / `modules.module_dynamic.major` / `modules.module_stat` / `orig` …）。
+ * 类型故意保持宽松（索引签名）：B 站加字段不影响解析与透传。
+ */
+export interface BiliDynamicItem {
   /** 动态 id（字符串） */
-  dynId: string;
-  /** 发布者 UP 名 */
-  author: string;
-  /** 发布者 uid */
-  uid: string;
-  /** 动态文案（截断到 200 字） */
-  text: string;
-  /** 发布时间（接口返回的秒时间戳，缺失为 0） */
-  pubTs: number;
-  /** 发布时间文本（接口返回的 pub_time 字符串，如 "2023-11-15 12:00:00"，缺失为空串） */
-  pubTimeText: string;
-  /** 动态类型（DYNAMIC_TYPE_* / MAJOR_TYPE_*，缺失为空串） */
-  type: string;
-  /** 抓到时刻（本地毫秒） */
-  fetchedAt: number;
+  id_str?: string;
+  /** 动态类型：DYNAMIC_TYPE_WORD / DRAW / AV / FORWARD / LIVE_RCMD / … */
+  type?: string;
+  visible?: boolean;
+  /** 基础信息：rid_str / comment_id_str / jump_url / is_only_fans … */
+  basic?: Record<string, unknown>;
+  /** 模块集合：module_author / module_dynamic / module_stat / module_more / … */
+  modules?: {
+    module_author?: Record<string, unknown>;
+    module_dynamic?: Record<string, unknown>;
+    module_stat?: Record<string, unknown>;
+    [key: string]: unknown;
+  };
+  /** 转发的原动态（结构与本类型相同；非转发为 null） */
+  orig?: BiliDynamicItem | null;
+  /** 其余字段原样保留 */
+  [key: string]: unknown;
+}
+
+/** 取动态 id（`id_str`，缺失回退 `id`）—— 仅用于增量基线与去重，不改动原始数据 */
+export function dynId(item: BiliDynamicItem | null | undefined): string {
+  if (!item) {
+    return '';
+  }
+  const s = item.id_str;
+  if (typeof s === 'string' && s) {
+    return s;
+  }
+  const n = item.id;
+  return n === undefined || n === null ? '' : String(n);
+}
+
+/** 取动态作者：`module_author.mid`（接口为 number）与 `name` */
+export function dynAuthor(item: BiliDynamicItem | null | undefined): { uid: string; name: string } {
+  const author = (item?.modules?.module_author ?? {}) as Record<string, unknown>;
+  const mid = author.mid;
+  return {
+    uid: mid === undefined || mid === null ? '' : String(mid),
+    name: typeof author.name === 'string' ? author.name : '',
+  };
+}
+
+/** 取发布时间（秒时间戳；`module_author.pub_ts` 接口为字符串，缺失为 0） */
+export function dynPubTs(item: BiliDynamicItem | null | undefined): number {
+  const author = (item?.modules?.module_author ?? {}) as Record<string, unknown>;
+  return toSecTimestamp(author.pub_ts);
+}
+
+/**
+ * 取发布时间的**相对文本**（`module_author.pub_time`）：接口返回的是相对时间，
+ * 如「18分钟前」「昨天」「09-10」—— 需要绝对时间请用 `dynPubTs()`。
+ */
+export function dynPubTimeText(item: BiliDynamicItem | null | undefined): string {
+  const author = (item?.modules?.module_author ?? {}) as Record<string, unknown>;
+  return typeof author.pub_time === 'string' ? author.pub_time : '';
+}
+
+/**
+ * 取动态正文文本（**仅供日志 / 本地文档等可读输出**；出口数据仍是原始 item）。
+ * 优先级：`module_dynamic.desc.text` → `major.opus.summary.text`（新版图文，desc 常为 null）
+ * → `major.archive.title`（视频）→ `major.draw.items.length`（旧版图文计数）→ `[转发] 原动态` → `[TYPE]`。
+ */
+export function dynText(item: BiliDynamicItem | null | undefined, maxLen = 200): string {
+  const dyn = (item?.modules?.module_dynamic ?? {}) as Record<string, unknown>;
+  const desc = (dyn.desc ?? {}) as Record<string, unknown>;
+  let text = typeof desc.text === 'string' ? desc.text.trim() : '';
+  const major = (dyn.major ?? {}) as Record<string, unknown>;
+  if (!text) {
+    const opus = (major.opus ?? {}) as Record<string, unknown>;
+    const summary = (opus.summary ?? {}) as Record<string, unknown>;
+    if (typeof summary.text === 'string' && summary.text.trim()) {
+      text = summary.text.trim();
+    }
+  }
+  if (!text) {
+    const archive = (major.archive ?? {}) as Record<string, unknown>;
+    if (typeof archive.title === 'string' && archive.title) {
+      text = `[视频] ${archive.title}`;
+    }
+  }
+  if (!text) {
+    const draw = (major.draw ?? {}) as Record<string, unknown>;
+    const drawCount = Array.isArray(draw.items) ? draw.items.length : 0;
+    if (drawCount > 0) {
+      text = `[图文] 共 ${drawCount} 张图`;
+    }
+  }
+  if (!text && item?.orig) {
+    text = `[转发] ${dynText(item.orig, 120)}`;
+  }
+  if (!text) {
+    text = `[${String(item?.type ?? '动态').replace('DYNAMIC_TYPE_', '')}]`;
+  }
+  return text.slice(0, maxLen);
 }
 
 /** 动态流接口前缀（初始 feed/all 与轮询 feed/all/update 共用） */
@@ -80,18 +165,20 @@ export function setFetchTargets(targets: Array<{ uid?: string; name?: string }>)
 }
 
 /** 该动态是否属于蹲饼目标（未配置目标时恒 true = 全收） */
-function isTargetDynamic(d: FetchedDynamic): boolean {
+function isTargetDynamic(item: BiliDynamicItem): boolean {
   if (targetUids.size === 0 && targetNames.size === 0) {
     return true;
   }
-  return targetUids.has(String(d.uid)) || targetNames.has(String(d.author));
+  const { uid, name } = dynAuthor(item);
+  return targetUids.has(uid) || targetNames.has(name);
 }
 
 /**
  * 动态监听回调：主项目以「模块」方式接入时注册，模块内部每次捕获到一批动态即回调。
+ * `items` 为**B 站原始动态对象数组**（与接口 `data.items[]` 一致，未做裁剪）。
  * kind: 'INIT' 初始加载 / 'UPDATE' 轮询更新。注册后动态交给监听器（不再自动外发/落盘）。
  */
-export type DynamicListener = (dynamics: FetchedDynamic[], kind: 'INIT' | 'UPDATE') => void;
+export type DynamicListener = (items: BiliDynamicItem[], kind: 'INIT' | 'UPDATE') => void;
 
 let dynamicListener: DynamicListener | null = null;
 
@@ -120,17 +207,18 @@ export function setFetchReportConfig(cfg: FetchReportConfig): void {
 /**
  * 把拦截到的一批动态 POST 到外部接口（外部项目处理）。
  * 请求体：
- * { source: 'bilibili_dynamic', kind: 'INIT'|'UPDATE', captured_at: 毫秒, count, items: FetchedDynamic[] }
+ * { source: 'bilibili_dynamic', kind: 'INIT'|'UPDATE', captured_at: 毫秒, count, items: BiliDynamicItem[] }
+ * 其中 `items` 为 **B 站原始动态对象**（与接口 data.items[] 一致）。
  */
-async function deliverToExternal(dynamics: FetchedDynamic[], kind: 'INIT' | 'UPDATE'): Promise<void> {
-  if (!reportConfig.enable || !reportConfig.url || dynamics.length === 0) {
+async function deliverToExternal(items: BiliDynamicItem[], kind: 'INIT' | 'UPDATE'): Promise<void> {
+  if (!reportConfig.enable || !reportConfig.url || items.length === 0) {
     return;
   }
   const url = reportConfig.url;
-  // 分拆：单次请求不超过 batchSize 条
-  const batches: FetchedDynamic[][] = [];
-  for (let i = 0; i < dynamics.length; i += reportConfig.batchSize) {
-    batches.push(dynamics.slice(i, i + reportConfig.batchSize));
+  // 分拆：单次请求不超过 batchSize 条（items 原样透传）
+  const batches: BiliDynamicItem[][] = [];
+  for (let i = 0; i < items.length; i += reportConfig.batchSize) {
+    batches.push(items.slice(i, i + reportConfig.batchSize));
   }
   for (const batch of batches) {
     const body = {
@@ -158,17 +246,19 @@ async function deliverToExternal(dynamics: FetchedDynamic[], kind: 'INIT' | 'UPD
 }
 
 /** 提炼动态基本信息（作者/时间/文案）追加写入本地文档（未配置外发接口时的兜底出口） */
-function appendDynamicsToLocalDoc(dynamics: FetchedDynamic[], kind: 'INIT' | 'UPDATE'): void {
+function appendDynamicsToLocalDoc(items: BiliDynamicItem[], kind: 'INIT' | 'UPDATE'): void {
   try {
     const lines: string[] = [];
     const now = new Date().toLocaleString('zh-CN', { hour12: false });
-    lines.push(`\n## ${now}｜${kind === 'INIT' ? '初始加载' : '轮询更新'}｜${dynamics.length} 条`);
-    for (const d of dynamics) {
-      // 时间：优先准确时间戳（绝对时间），pub_ts 缺失才退回接口相对文本
-      const time = d.pubTs > 0 ? formatAbsTime(d.pubTs) : d.pubTimeText || '（未知）';
-      lines.push(`- 作者：${d.author || d.uid || '匿名'}`);
+    lines.push(`\n## ${now}｜${kind === 'INIT' ? '初始加载' : '轮询更新'}｜${items.length} 条`);
+    for (const item of items) {
+      const { uid, name } = dynAuthor(item);
+      const ts = dynPubTs(item);
+      // 时间：优先绝对时间戳（pub_ts）；缺失才退回接口的相对文本（pub_time，如「18分钟前」）
+      const time = ts > 0 ? formatAbsTime(ts) : dynPubTimeText(item) || '（未知）';
+      lines.push(`- 作者：${name || uid || '匿名'}`);
       lines.push(`  时间：${time}`);
-      lines.push(`  内容：${d.text || '（无文案）'}`);
+      lines.push(`  内容：${dynText(item) || '（无文案）'}`);
       lines.push('');
     }
     fs.mkdirSync(path.dirname(LOCAL_DOC_PATH), { recursive: true });
@@ -183,39 +273,40 @@ function appendDynamicsToLocalDoc(dynamics: FetchedDynamic[], kind: 'INIT' | 'UP
 }
 
 /** 数据出口统一入口 + 蹲饼信息打印：每次蹲到动态都打印作者/时间/内容（控制台与日志文件双写） */
-function deliverDynamics(dynamics: FetchedDynamic[], kind: 'INIT' | 'UPDATE'): void {
-  if (dynamics.length === 0) {
+function deliverDynamics(items: BiliDynamicItem[], kind: 'INIT' | 'UPDATE'): void {
+  if (items.length === 0) {
     return;
   }
   if (sessionActive) {
     sessionDelivered = true; // 本次蹲饼获取期间取到新动态（供「刷新后仍未取到」的二次尝试判断）
   }
-  // 蹲饼信息：本次蹲到的动态摘要（作者/时间/内容）
-  logDyn(`🥞 蹲到动态 ${dynamics.length} 条（${kind === 'INIT' ? '初始加载' : '轮询更新'}）`);
-  for (const d of dynamics.slice(0, 10)) {
-    // 时间：优先准确时间戳（绝对时间），pub_ts 缺失才退回接口相对文本
-    const time = d.pubTs > 0 ? formatAbsTime(d.pubTs) : d.pubTimeText || '（未知）';
-    console.log(`   - ${d.author || d.uid || '匿名'} [${time}]: ${(d.text || '（无文案）').slice(0, 60)}`);
+  // 蹲饼信息：本次蹲到的动态摘要（仅日志展示；出口数据为 B 站原始 item）
+  logDyn(`🥞 蹲到动态 ${items.length} 条（${kind === 'INIT' ? '初始加载' : '轮询更新'}）`);
+  for (const item of items.slice(0, 10)) {
+    const { uid, name } = dynAuthor(item);
+    const ts = dynPubTs(item);
+    const time = ts > 0 ? formatAbsTime(ts) : dynPubTimeText(item) || '（未知）';
+    console.log(`   - ${name || uid || '匿名'} [${time}]: ${(dynText(item) || '（无文案）').slice(0, 60)}`);
   }
-  if (dynamics.length > 10) {
-    console.log(`   … 其余 ${dynamics.length - 10} 条省略`);
+  if (items.length > 10) {
+    console.log(`   … 其余 ${items.length - 10} 条省略`);
   }
   // 数据出口：
   // - 模块接入方注册了动态监听（setDynamicListener / 引擎 onDynamics）→ 交给监听器（外发/落盘由主项目决定）
   // - 否则（example 独立运行）：配置了外发接口 → POST 外部项目；未配置 → 提炼基本信息写本地文档
   if (dynamicListener) {
-    dynamicListener(dynamics, kind);
+    dynamicListener(items, kind);
     return;
   }
   if (reportConfig.enable) {
-    void deliverToExternal(dynamics, kind);
+    void deliverToExternal(items, kind);
   } else {
-    appendDynamicsToLocalDoc(dynamics, kind);
+    appendDynamicsToLocalDoc(items, kind);
   }
 }
 
 /** 已收集的动态（内存存储，进程内有效；展示时倒序 = 最新在前） */
-const collected: FetchedDynamic[] = [];
+const collected: BiliDynamicItem[] = [];
 const MAX_COLLECTED = 1000;
 
 /** 已挂监听的页面（幂等，防重复挂载；页面销毁后由 WeakSet 自动回收） */
@@ -330,65 +421,40 @@ const formatAbsTime = (sec: number): string => new Date(sec * 1000).toLocaleStri
  * 取本批**最新**的一条（pubTs 最大）——增量基线必须是最新那条，不依赖列表排列方向。
  * 兜底：pubTs 全部缺失时退回到列表第一条（B 站 feed/all 实际为从新到旧、第一条即最新）。
  */
-function latestOf(dynamics: FetchedDynamic[]): FetchedDynamic | undefined {
+function latestOf(dynamics: BiliDynamicItem[]): BiliDynamicItem | undefined {
   if (dynamics.length === 0) {
     return undefined;
   }
   let latest = dynamics[0];
   for (const d of dynamics) {
-    if (d.pubTs > latest.pubTs) {
+    if (dynPubTs(d) > dynPubTs(latest)) {
       latest = d;
     }
   }
   return latest;
 }
 
-/** 从动态流接口响应 JSON 中提取动态列表（解析失败返回 []） */
-export function extractDynamicsFromPayload(payload: unknown): FetchedDynamic[] {
-  const out: FetchedDynamic[] = [];
+/**
+ * 从动态流接口响应 JSON 中提取**原始动态列表**（与接口 `data.items[]` 一致，原样透传，
+ * 不裁剪/不改名/不合成字段）。
+ * - `code !== 0` 或 `items` 非数组 → 返回 `[]`；
+ * - 配置了蹲饼目标（`fetch_targets`）时只保留目标作者的动态；
+ * - 解析失败不抛错。
+ */
+export function extractDynamicsFromPayload(payload: unknown): BiliDynamicItem[] {
   try {
-    const root = payload as { code?: number; data?: { items?: unknown[] } };
+    const root = payload as { code?: number; data?: { items?: unknown } };
     if (root?.code !== 0 || !Array.isArray(root.data?.items)) {
-      return out;
+      return [];
     }
-    for (const raw of root.data!.items!) {
-      const item = (raw ?? {}) as Record<string, unknown>;
-      const modules = (item.modules ?? {}) as Record<string, unknown>;
-      const author = (modules.module_author ?? {}) as Record<string, unknown>;
-      const dyn = (modules.module_dynamic ?? {}) as Record<string, unknown>;
-      const desc = (dyn.desc ?? {}) as Record<string, unknown>;
-      // 动态文案：desc.text 优先；视频动态 desc.text 常为空 → 兜底取视频标题/图文信息
-      let text = typeof desc.text === 'string' ? desc.text.trim() : '';
-      if (!text) {
-        const major = (dyn.major ?? {}) as Record<string, unknown>;
-        const archive = (major.archive ?? {}) as Record<string, unknown>;
-        if (typeof archive.title === 'string' && archive.title) {
-          text = `[视频] ${archive.title}`;
-        } else {
-          const draw = (major.draw ?? {}) as Record<string, unknown>;
-          const drawCount = Array.isArray(draw.items) ? draw.items.length : 0;
-          text = drawCount > 0 ? `[图文] 共 ${drawCount} 张图` : `[${String(item.type ?? '动态').replace('DYNAMIC_TYPE_', '')}]`;
-        }
-      }
-      out.push({
-        dynId: typeof item.id_str === 'string' ? item.id_str : String(item.id ?? ''),
-        author: typeof author.name === 'string' ? author.name : '',
-        uid: author.mid === undefined || author.mid === null ? '' : String(author.mid),
-        text: text.slice(0, 200),
-        pubTs: toSecTimestamp(author.pub_ts),
-        pubTimeText: typeof author.pub_time === 'string' ? author.pub_time : '',
-        type: typeof item.type === 'string' ? item.type : '',
-        fetchedAt: Date.now(),
-      });
+    const items = (root.data!.items as unknown[]).filter((it): it is BiliDynamicItem => !!it && typeof it === 'object');
+    if (targetUids.size > 0 || targetNames.size > 0) {
+      return items.filter(isTargetDynamic);
     }
+    return items;
   } catch {
-    /* 解析失败忽略 */
+    return [];
   }
-  // 指向性过滤：配置了蹲饼目标（fetch_targets）时，只保留目标作者的动态
-  if (targetUids.size > 0 || targetNames.size > 0) {
-    return out.filter(isTargetDynamic);
-  }
-  return out;
 }
 
 /** 「有新动态，点击查看」按钮选择器（外层容器 + 内层文本 div） */
@@ -849,8 +915,8 @@ export function attachDynamicFeedListener(page: Page): void {
             collected.shift();
           }
           const latest = latestOf(dynamics);
-          lastFetchedDynId = latest?.dynId ?? '';
-          lastFetchedPubTs = latest?.pubTs ?? 0;
+          lastFetchedDynId = dynId(latest);
+          lastFetchedPubTs = dynPubTs(latest);
           saveLastFetched(lastFetchedDynId, lastFetchedPubTs);
           deliverDynamics(dynamics, 'INIT');
           return;
@@ -859,14 +925,16 @@ export function attachDynamicFeedListener(page: Page): void {
         // 越界式边界判断：本批出现「不晚于基线发布时间」的动态（pubTs <= 边界）→ 已翻过基线 → 增量完整。
         // 基线 dynId 被删除时，靠 pubTs 仍能判断边界（更旧的动态还在）；dynId 精确匹配作为额外兜底。
         const boundaryPubTs = catchUpBoundaryPubTs || lastFetchedPubTs;
-        const hasBoundary = dynamics.some(
-          (d) => (d.dynId !== '' && d.dynId === lastFetchedDynId) || (d.pubTs > 0 && boundaryPubTs > 0 && d.pubTs <= boundaryPubTs)
-        );
+        const hasBoundary = dynamics.some((d) => {
+          const id = dynId(d);
+          const ts = dynPubTs(d);
+          return (id !== '' && id === lastFetchedDynId) || (ts > 0 && boundaryPubTs > 0 && ts <= boundaryPubTs);
+        });
 
         if (hasBoundary) {
           // 已越过基线 → 本批中比基线更新的（pubTs > 边界）才是本次新动态 → 增量完整
-          const memSet = new Set(collected.map((d) => d.dynId));
-          const fresh = dynamics.filter((d) => d.pubTs > boundaryPubTs && !memSet.has(d.dynId));
+          const memSet = new Set(collected.map((d) => dynId(d)));
+          const fresh = dynamics.filter((d) => dynPubTs(d) > boundaryPubTs && !memSet.has(dynId(d)));
           if (fresh.length > 0) {
             for (const d of fresh) {
               collected.push(d);
@@ -885,9 +953,14 @@ export function attachDynamicFeedListener(page: Page): void {
             }
           }
           // 基线更新为本次全局最新（第一页最新；pubTs 取最大，不依赖顺序）
-          const latest = sessionLatest || latestOf(dynamics);
-          lastFetchedDynId = latest?.dynId ?? lastFetchedDynId;
-          lastFetchedPubTs = latest?.pubTs ?? lastFetchedPubTs;
+          if (sessionLatest) {
+            lastFetchedDynId = sessionLatest.dynId || lastFetchedDynId;
+            lastFetchedPubTs = sessionLatest.pubTs || lastFetchedPubTs;
+          } else {
+            const latest = latestOf(dynamics);
+            lastFetchedDynId = dynId(latest) || lastFetchedDynId;
+            lastFetchedPubTs = dynPubTs(latest) || lastFetchedPubTs;
+          }
           saveLastFetched(lastFetchedDynId, lastFetchedPubTs);
           sessionLatest = null;
           catchUpBoundaryPubTs = 0;
@@ -895,8 +968,8 @@ export function attachDynamicFeedListener(page: Page): void {
         } else {
           // 未越过基线 → 本批都在基线之后（都是新增或已在内存）→ 还没追到上次已获取最新，
           // 说明上次之后的新动态超过单批数量，还有未加载的 → 触发滚动补全
-          const memSet = new Set(collected.map((d) => d.dynId));
-          const fresh = dynamics.filter((d) => d.pubTs > boundaryPubTs && !memSet.has(d.dynId));
+          const memSet = new Set(collected.map((d) => dynId(d)));
+          const fresh = dynamics.filter((d) => dynPubTs(d) > boundaryPubTs && !memSet.has(dynId(d)));
           if (fresh.length > 0) {
             for (const d of fresh) {
               collected.push(d);
@@ -910,7 +983,7 @@ export function attachDynamicFeedListener(page: Page): void {
           // 记录本次全局最新（第一页最新），补全完成后提交为基线
           if (!sessionLatest) {
             const latest = latestOf(dynamics);
-            sessionLatest = latest ? { dynId: latest.dynId, pubTs: latest.pubTs } : null;
+            sessionLatest = latest ? { dynId: dynId(latest), pubTs: dynPubTs(latest) } : null;
           }
           // 固定滚动补全的追边界标（防止补全过程中基线变化导致无法终止）
           if (!catchUpBoundaryPubTs) {
@@ -1004,8 +1077,8 @@ export async function ensureDynamicPage(context: TaskContext): Promise<Page | nu
   }
 }
 
-/** 已收集的全部动态（最新在前） */
-export function getCollectedDynamics(): FetchedDynamic[] {
+/** 已收集的全部动态（**B 站原始 item**，最新在前） */
+export function getCollectedDynamics(): BiliDynamicItem[] {
   return [...collected].reverse();
 }
 
