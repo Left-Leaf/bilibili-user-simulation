@@ -8,6 +8,7 @@ export type {
   KernelInitializeOptions,
   KernelFetchOptions,
   KernelStopFetchOptions,
+  KernelFollowUpOptions,
   KernelStatus,
   KernelConsoleOptions,
 } from './kernel.js';
@@ -28,3 +29,7 @@ export type { PersonaEntry } from '../persona/loader.js';
 // 蹲饼数据（出口 = B 站接口原始 items）
 export { dynAuthor, dynId, dynPubTimeText, dynPubTs, dynText } from '../business/passive-fetch.js';
 export type { BiliDynamicItem, DynamicListener } from '../business/passive-fetch.js';
+
+// 主动关注 UP（独立操作，不进任务流）
+export { followUpOnPage } from '../business/follow-up.js';
+export type { FollowUpResult, FollowUpTarget } from '../business/follow-up.js';

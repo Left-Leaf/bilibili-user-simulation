@@ -62,6 +62,13 @@ export class TaskExecutor {
           break;
         }
 
+        // 浏览器已关闭/断开（如下线）→ 结束任务流，
+        // 否则主操作页失效后任务会反复「前置检查失败」空转（毫秒级上万次）刷屏
+        if (this.context.browser && !this.context.browser.isConnected()) {
+          console.log('🛑 浏览器已关闭，结束任务流');
+          break;
+        }
+
         const task = await this.generator.next(this.context);
 
         if (!task) {

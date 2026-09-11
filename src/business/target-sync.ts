@@ -29,10 +29,10 @@ const FOLLOW_SELECTORS = [
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
 /** 关注按钮状态：followed（已关注）/ not-followed（可关注）/ unknown（找不到/无法判定） */
-type FollowState = 'followed' | 'not-followed' | 'unknown';
+export type FollowState = 'followed' | 'not-followed' | 'unknown';
 
 /** 判断当前页（应为目标 UP 主页）的关注状态：读「关注按钮」的 class / 文案 */
-async function readFollowState(page: NonNullable<TaskContext['page']>): Promise<FollowState> {
+export async function readFollowState(page: NonNullable<TaskContext['page']>): Promise<FollowState> {
   try {
     const s = (await page.evaluate((sels) => {
       for (const sel of sels) {

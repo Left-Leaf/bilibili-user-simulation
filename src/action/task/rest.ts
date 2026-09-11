@@ -52,9 +52,12 @@ export class RestTask extends BaseTask {
     try {
       // 任务一开始就根据休息时长决定：长休息 = 关闭浏览器下线；短休息 = 停止活动（浏览器保持打开）
       const isLong = durationMs > threshold;
+      // 内核模式（context.state.preventBrowserClose=true）：内核没有「关浏览器 → 离线等待 → 重新上线」的编排，
+      // 因此长休息降级为「停止活动」（浏览器保持打开），避免任务关掉浏览器后内核失去会话
+      const keepBrowserOpen = context.state.get('preventBrowserClose') === true;
 
       // ===== 长休息：立即关闭浏览器下线（离线等待由 bilibili-user-simulation 用 durationMs 执行）=====
-      if (isLong) {
+      if (isLong && !keepBrowserOpen) {
         this.log(
           `🍽️ 长休息：${(durationMs / 1000).toFixed(0)}s（判定用户离开，立即关闭浏览器下线，${(durationMs / 60000).toFixed(1)} 分钟后重新上线）`
         );
@@ -70,7 +73,9 @@ export class RestTask extends BaseTask {
       }
 
       // ===== 短休息：停止活动（浏览器保持打开、上线继续），期间可被「强制上线」指令中断 =====
-      this.log(`🍽️ 短休息：${(durationMs / 1000).toFixed(0)}s（停止活动，浏览器保持打开）`);
+      this.log(
+        `${isLong ? '🍽️ 长休息（内核模式：保持浏览器打开）' : '🍽️ 短休息'}：${(durationMs / 1000).toFixed(0)}s（停止活动）`
+      );
       const FORCE_ONLINE_CHECK_MS = 5000; // 强制上线检查间隔（响应延迟 ≤5s）
       const totalSec = durationMs / 1000;
       let elapsed = 0;

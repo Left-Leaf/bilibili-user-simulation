@@ -39,6 +39,7 @@ export type {
   KernelInitializeOptions,
   KernelFetchOptions,
   KernelStopFetchOptions,
+  KernelFollowUpOptions,
   KernelStatus,
   KernelConsoleOptions,
 } from './kernel/kernel.js';
@@ -49,3 +50,7 @@ export { formatKernelStatus } from './kernel/commands.js';
 
 // 蹲饼底层开关（内核已封装；需要直接操作被动蹲饼时可用）
 export { setFetchEnabled, isFetchEnabled } from './business/passive-fetch.js';
+
+// 主动关注 UP（独立操作，不进入模拟任务流；内核已封装 kernel.followUp()）
+export { followUpOnPage } from './business/follow-up.js';
+export type { FollowUpResult, FollowUpTarget } from './business/follow-up.js';

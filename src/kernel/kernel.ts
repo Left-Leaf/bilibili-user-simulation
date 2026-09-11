@@ -58,6 +58,7 @@ import {
 import type { BiliDynamicItem, DynamicListener, FetchReportConfig } from '../business/passive-fetch.js';
 import { fetchCoordinator } from '../business/fetch-coordinator.js';
 import { syncFetchTargets } from '../business/target-sync.js';
+import { followUpOnPage, type FollowUpResult, type FollowUpTarget } from '../business/follow-up.js';
 import { isVideoPageUrl } from '../utils/bilibili-dom.js';
 import { packagePath } from '../utils/paths.js';
 import type { Browser, Page } from 'puppeteer-core';
@@ -167,6 +168,17 @@ export interface KernelFetchOptions {
 export interface KernelStopFetchOptions {
   /** 是否同时关闭动态页标签（默认 false：仅停止捕获，页面保留以便快速重开） */
   closePage?: boolean;
+}
+
+/** 主动关注 UP 的选项 */
+export interface KernelFollowUpOptions {
+  /**
+   * 模拟行为运行中时，是否在关注期间暂停「生成新任务」（默认 **true**）。
+   * - true：关注这几秒内不再派发新任务，避免恰好有「关闭视频标签 / 切换主操作页」的任务
+   *   与本操作竞争标签页；**不会中断**正在执行的任务；
+   * - false：完全不干预任务流（操作全在临时标签页上，正常情况下也不冲突）。
+   */
+  holdTasks?: boolean;
 }
 
 /** 内核状态快照 */
@@ -371,7 +383,12 @@ export class SimulationKernel {
     this.executor = new TaskExecutor(this.generator, ctx, {
       verbose: !!options.verbose,
       stopOnError: false,
+      maxTasks: Number.MAX_SAFE_INTEGER, // 与生成器一致：任务流只由「停止模拟 / 浏览器关闭」结束
     });
+
+    // 内核模式：内核没有「关浏览器 → 离线等待 → 重新上线」的编排，禁止任务关闭浏览器
+    // （RestTask 长休息据此降级为「停止活动」，浏览器保持打开）
+    ctx.state.set('preventBrowserClose', true);
 
     this.initialized = true;
     this.loggedIn = await this.ensureLoggedIn();
@@ -489,6 +506,70 @@ export class SimulationKernel {
     const dynPage = await ensureDynamicPage(ctx).catch(() => null);
     if (dynPage && this.page && this.page !== dynPage) {
       await this.page.bringToFront().catch(() => {});
+    }
+  }
+
+  // ===== 主动关注 UP（独立操作，不进入模拟任务流） =====
+
+  /**
+   * 主动关注某个 UP —— 一次性操作，**不进入任务队列**（生成器 / 执行器都不参与）。
+   *
+   * 对模拟任务的保证：
+   * - 全部操作在**临时标签页**上完成、结束后立即关闭；从不改动主操作页（`ctx.page`）、不中断当前任务；
+   * - 模拟行为运行中时，仅在这几秒内暂停「生成新任务」（`holdTasks`，默认开启）——
+   *   防止恰好有「关闭视频标签 / 切换主操作页」的任务与本次操作竞争标签页；
+   *   传 `holdTasks: false` 则完全不干预任务流；
+   * - 幂等：已关注直接返回 `status: 'followed'`，不会重复点击。
+   *
+   * @param target uid 字符串（纯数字）或 `{ uid, name }`
+   */
+  async followUp(target: string | FollowUpTarget, options: KernelFollowUpOptions = {}): Promise<FollowUpResult> {
+    this.assertInitialized();
+    const ctx = this.ctx!;
+    const browser = ctx.browser;
+    if (!browser || !browser.isConnected()) {
+      throw new Error('浏览器已断开：请重新 initialize()');
+    }
+    const uid = (typeof target === 'string' ? target : String(target?.uid ?? '')).trim();
+    const name = typeof target === 'string' ? undefined : target?.name;
+    if (!/^\d+$/.test(uid)) {
+      return { target: { uid, name }, status: 'failed', detail: '需要 UP 的 uid（纯数字），例如 follow 161775300' };
+    }
+
+    // 仅在「模拟行为运行中」才需要协调；未运行时完全不干预
+    const holdTasks = options.holdTasks !== false && this.simulationRunning;
+    if (holdTasks) {
+      fetchCoordinator.pause(); // 只暂停「生成新任务」，不中断正在执行的任务
+    }
+
+    const page = await browser.newPage().catch(() => null);
+    if (!page) {
+      if (holdTasks) {
+        fetchCoordinator.resume();
+      }
+      return { target: { uid, name }, status: 'failed', detail: '无法打开临时标签页' };
+    }
+
+    try {
+      this.log(`➕ 主动关注 UP（uid=${uid}${name ? `｜${name}` : ''}，临时标签页操作）…`);
+      const result = await followUpOnPage(page, { uid, name });
+      this.log(result.status === 'failed' ? `❌ 关注失败：${result.detail}` : `✅ ${result.detail ?? '已关注'}`);
+      return result;
+    } finally {
+      await page.close().catch(() => {}); // 关闭临时标签页（主操作页与任务流不受影响）
+      // 兜底：若主操作页恰好被任务切换到了这个临时页（已被我们关闭），恢复一个可用页面，
+      // 避免后续任务因「页面已关闭」全部前置检查失败
+      if (this.ctx && (!this.ctx.page || this.ctx.page.isClosed())) {
+        const pages = (await browser.pages().catch(() => [] as Page[])).filter((p) => !p.isClosed());
+        const fallback = pages[0] ?? (await browser.newPage().catch(() => null));
+        if (fallback) {
+          this.ctx.page = fallback;
+          this.log(`🔧 主操作页已失效，已切换到: ${fallback.url().slice(0, 60) || '(新标签页)'}`);
+        }
+      }
+      if (holdTasks) {
+        fetchCoordinator.resume();
+      }
     }
   }
 

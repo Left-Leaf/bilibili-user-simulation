@@ -66,15 +66,7 @@ await kernel.initialize({
 const available = kernel.listPersonas();
 console.log(`[内核演示] 可用人格（${kernel.personaDir}）: ${available.map((p) => p.id).join(', ') || '(无)'}`);
 
-// ② 打开蹲饼（独立）
-await kernel.startFetch();
-
-// ③ 打开模拟行为（独立）
-await kernel.startSimulation();
-
-console.log(`\n[${fmtTime()}] ✅ 蹲饼 + 模拟行为均已开启（可用指令独立开关）。输入 help 查看全部指令。\n`);
-
-// ④ 注册自定义指令（示例）：quit —— 关闭内核并退出进程
+// ② 注册自定义指令（示例）：quit —— 关闭内核并退出进程
 kernel.registerCommand('quit', {
   description: '关闭内核并退出进程',
   usage: 'quit',
@@ -84,7 +76,8 @@ kernel.registerCommand('quit', {
   },
 });
 
-// ⑤ 挂载 stdin 指令控制台：终端输入 sim off / fetch on / status 等即控制功能开关
+// ③ 挂载 stdin 指令控制台：终端输入 sim off / fetch on / follow <uid> / status 等即控制功能
+//    尽早挂载：蹲饼「初次获取」可能耗时 20s+，期间也应能接收指令
 kernel.attachConsole({ onInterrupt: () => void quit() });
 
 let quitting = false;
@@ -96,3 +89,9 @@ const quit = async (): Promise<void> => {
   await kernel.shutdown().catch(() => {});
   process.exit(0);
 };
+
+// ④ 打开蹲饼（独立）→ ⑤ 打开模拟行为（独立）
+await kernel.startFetch();
+await kernel.startSimulation();
+
+console.log(`\n[${fmtTime()}] ✅ 蹲饼 + 模拟行为均已开启（可用指令独立开关）。输入 help 查看全部指令。\n`);

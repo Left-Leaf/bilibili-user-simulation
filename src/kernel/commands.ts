@@ -12,6 +12,7 @@
  * 内置指令：
  *   sim on | sim off                                     模拟行为（任务流）从零打开 / 彻底结束
  *   fetch on | fetch off [close]                          蹲饼开关
+ *   follow <uid> [no-hold]                                主动关注 UP（独立操作，不进任务流）
  *   login                                                 确保登录（未登录则扫码）
  *   status                                                状态快照
  *   dynamics [n]                                          查看最近捕获的动态
@@ -102,6 +103,19 @@ export function registerBuiltinCommands(register: (name: string, command: Kernel
         default:
           return { ok: false, output: '用法: fetch on | fetch off [close]' };
       }
+    },
+  });
+
+  register('follow', {
+    description: '主动关注指定 UP（独立操作，不进入模拟任务流；已关注则幂等返回）',
+    usage: 'follow <uid> [no-hold]',
+    handler: async ({ kernel, args }) => {
+      const uid = args[0];
+      if (!uid) {
+        return { ok: false, output: '用法: follow <uid>（UP 的 uid，纯数字；带 no-hold 则连「暂停生成新任务」也不做）' };
+      }
+      const r = await kernel.followUp(uid, { holdTasks: !args.includes('no-hold') });
+      return { ok: r.status !== 'failed', output: `${r.status === 'failed' ? '❌' : '✅'} ${r.detail ?? r.status}` };
     },
   });
 

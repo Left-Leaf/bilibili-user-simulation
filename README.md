@@ -53,6 +53,7 @@ await kernel.shutdown();          // 全部关闭 + 退出浏览器
 | `shutdown()` | 停止全部 + 关闭浏览器 |
 | `getStatus()` / `getDynamics(n)` | 状态快照 / 已捕获动态（B 站原始 item） |
 | `listPersonas()` / `personaDir` | 当前人格目录下全部可用人格（`personaId` = 文件名）/ 当前人格目录 |
+| `followUp(uid, opts)` | **主动关注某个 UP**（独立操作，不进入任务流，见下） |
 | `executeCommand(line)` / `attachConsole(opts)` | 指令控制（见下「内核指令」） |
 
 **人格目录（personaId = 文件名）**：`personaDir` 指向人格目录（默认包内 `data/personas`），
@@ -132,10 +133,32 @@ await runPersonaEngine({
 | `sim off` | **彻底结束**模拟行为（阻塞生成器 → 持续式任务收尾 → 清理页面） |
 | `fetch on` | 打开蹲饼（目标 UP 对齐 → 动态页 → 初次获取 → 守护） |
 | `fetch off [close]` | 关闭蹲饼（保留监听与增量基线，便于快速重开；加 `close` 同时关闭动态页标签） |
+| `follow <uid> [no-hold]` | **主动关注 UP**（独立操作，不进任务流；`no-hold` 连「暂停生成新任务」也不做） |
 | `login` | 确保登录（未登录则扫码） |
 | `status` | 打印内核状态快照（初始化 / 登录态 / 两个功能 / 当前页面 / 动态数） |
 | `dynamics [n]` | 查看最近捕获的动态（默认 5 条，按原始字段展示摘要） |
 | `help` | 列出全部可用指令 |
+
+### 主动关注 UP（`follow` / `kernel.followUp()`）
+
+一次性操作，**不进入模拟任务流**（生成器 / 执行器都不参与），且对正在运行的模拟任务**不做破坏性干扰**：
+
+- 全部操作在**临时标签页**上完成（打开 UP 主页 → 判断是否已关注 → 未关注则拟人点击「关注」），
+  结束后**立即关闭**；从不改动主操作页（`ctx.page`）、**不中断正在执行的任务**；
+- 模拟行为运行时，仅在这几秒内**暂停「生成新任务」**（防止恰好有「关闭视频标签 / 切换主操作页」
+  的任务与本次操作竞争标签页）；传 `no-hold`（或 `holdTasks: false`）则完全不干预；
+- **幂等**：已关注直接返回 `status: 'followed'`，不会重复点击；
+- 仅支持按 **uid**（纯数字）关注；失败返回 `status: 'failed'` + `detail`（如 uid 缺失、按钮不可用）。
+
+```ts
+const r = await kernel.followUp('161775300');            // 或 { uid: '161775300', name: '明日方舟' }
+// r: { target, status: 'followed' | 'now-followed' | 'failed', detail }
+await kernel.executeCommand('follow 161775300');          // 指令通道（留空 / 非数字会给出用法提示）
+await kernel.followUp('161775300', { holdTasks: false }); // 完全不干预任务流
+```
+
+> 与蹲饼目标对齐（`syncFetchTargets`）的区别：后者在**主操作页**上导航，只应在启动阶段调用；
+> 本功能随时可用（含模拟运行中），不会影响任务流。
 
 ## 蹲饼数据格式（出口 = B 站接口原始数据）
 
