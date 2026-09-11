@@ -52,12 +52,10 @@ import {
   setDynamicListener,
   setFetchEnabled,
   setFetchReportConfig,
-  setFetchTargets,
   waitForInitialFetch,
 } from '../business/passive-fetch.js';
 import type { BiliDynamicItem, DynamicListener, FetchReportConfig } from '../business/passive-fetch.js';
 import { fetchCoordinator } from '../business/fetch-coordinator.js';
-import { syncFetchTargets } from '../business/target-sync.js';
 import { followUpOnPage, type FollowUpResult, type FollowUpTarget } from '../business/follow-up.js';
 import { isVideoPageUrl } from '../utils/bilibili-dom.js';
 import { packagePath } from '../utils/paths.js';
@@ -156,8 +154,6 @@ export interface KernelInitializeOptions {
 
 /** 打开蹲饼的选项 */
 export interface KernelFetchOptions {
-  /** 是否先对齐 `persona.fetch_targets` 目标 UP（默认 true；每个内核实例只对齐一次） */
-  syncTargets?: boolean;
   /** 初次获取等待上限（默认 25000ms；超时不阻塞，守护继续重试） */
   initialTimeoutMs?: number;
   /** 动态页守护间隔（默认 60000ms；动态页丢失/被切走时自动补开） */
@@ -264,7 +260,6 @@ export class SimulationKernel {
 
   private fetchRunning = false;
   private fetchWatchdog: ReturnType<typeof setInterval> | null = null;
-  private fetchTargetsSynced = false;
 
   // ===== 只读查询 =====
 
@@ -367,7 +362,6 @@ export class SimulationKernel {
     if (options.fetchReport) {
       setFetchReportConfig(options.fetchReport);
     }
-    setFetchTargets(this.persona.fetch_targets ?? []);
 
     this.log(`🚀 内核初始化：打开浏览器（headless=${this.headless}）…`);
     const ctx = await this.openBrowser();
@@ -415,7 +409,9 @@ export class SimulationKernel {
   // ===== ② 蹲饼：独立开关 =====
 
   /**
-   * 打开蹲饼：对齐目标 UP（可选）→ 打开动态页并挂监听 → 等初次获取 → 启动守护。
+   * 打开蹲饼：打开动态页并挂监听 → 等初次获取 → 启动守护。
+   *
+   * 采集范围 = **关注流全部 UP**的动态（不读人格配置）；新增关注用 `followUp()` / `follow` 指令。
    *
    * 重复调用幂等；返回是否成功打开动态页（false 时守护仍会持续重试）。
    */
@@ -426,20 +422,7 @@ export class SimulationKernel {
       return true;
     }
     const ctx = this.ctx!;
-    const targets = this.persona?.fetch_targets ?? [];
-    setFetchTargets(targets);
-
-    // 蹲饼前置：目标 UP 对齐（每个内核实例只做一次；失败降级不阻塞）
-    if (options.syncTargets !== false && targets.length > 0 && !this.fetchTargetsSynced) {
-      this.log(`🎯 [蹲饼目标] 开始对齐目标 UP（共 ${targets.length} 个）…`);
-      const reports = await syncFetchTargets(ctx, targets).catch(() => []);
-      for (const r of reports) {
-        const tag = r.status === 'followed' ? '✅ 已关注' : r.status === 'now-followed' ? '➕ 新关注' : '⚠️ 失败';
-        const label = `${r.name || '(未知 UP)'}（uid ${r.uid || '?'}）`;
-        this.log(`🎯 [蹲饼目标] ${tag} ${label}${r.detail ? '｜' + r.detail : ''}`);
-      }
-      this.fetchTargetsSynced = true;
-    }
+    setFetchEnabled(true);
 
     // 蹲饼开启期间**禁止长休息**：长休息会关闭浏览器 / 长时间停止活动，会使蹲饼失效；
     // 生成侧（Rest 注册表与 BROWSER_CLOSED 分支）据此把长休息权重置 0。
@@ -906,7 +889,6 @@ export class SimulationKernel {
     this.loggedIn = false;
     this.fetchRunning = false;
     this.simulationRunning = false;
-    this.fetchTargetsSynced = false;
     this.log('✅ 内核已关闭（浏览器已退出）');
   }
 

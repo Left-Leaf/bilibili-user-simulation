@@ -93,6 +93,8 @@ const quit = async (): Promise<void> => {
 
 // ④ 打开蹲饼（独立）→ ⑤ 打开模拟行为（独立）
 await kernel.startFetch();
-await kernel.startSimulation();
-
-console.log(`\n[${fmtTime()}] ✅ 蹲饼 + 模拟行为均已开启（可用指令独立开关）。输入 help 查看全部指令。\n`);
+// 初次获取期间可能已通过 quit / Ctrl+C 退出（shutdown 已执行）→ 不再启动模拟行为，避免竞态报错
+if (!quitting) {
+  await kernel.startSimulation();
+  console.log(`\n[${fmtTime()}] ✅ 蹲饼 + 模拟行为均已开启（可用指令独立开关）。输入 help 查看全部指令。\n`);
+}

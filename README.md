@@ -25,7 +25,7 @@ npm run typecheck
 - 人格默认取包内 `data/personas/{id}.json`；
 - 动态出口读 `config-app.json5`：`fetch_report` 外发接口，未配置则写本地 `logs/fetched-dynamics.md`；
 - 登录：启动后若未登录会自动进入**强制登录闸门**并弹出二维码（有头窗口 / 无头终端二维码）等待扫码，
-  登录成功后才开始后续流程（蹲饼目标对齐 → 动态页 → 模拟行为）；退出登录/等待重登时可用 `login` 指令重新扫码。
+  登录成功后才开始后续流程（动态页 → 模拟行为）；退出登录/等待重登时可用 `login` 指令重新扫码。
 - 引擎运行时通过 **stdin** 接收指令（见下「运行时指令」）：`login` `logout` `reload` `online` `record on|off` `status` `help`。
 
 ### 2) 内核：初始化后按需独立开关（推荐给主项目）
@@ -116,7 +116,7 @@ await runPersonaEngine({
 | `login` | 登录 | 强制执行登录流程（弹出/重打二维码等待扫码）。启动后未登录会自动进入登录闸门，一般无需手动输入；用于「退出登录后 / 等待重登态」解除等待重新扫码，或换号登录。 |
 | `logout` | 退出登录 | 退出当前账号：中断当前任务流，收尾执行 LogoutTask 登出 → 下线；浏览器保持打开（仅 B 站主页），等待重新登录。 |
 | `online` | 强制唤醒（上线） | 强制结束当前休息——无论是长休息任务（RestTask 已关浏览器离线）还是会话间的下线休息倒计时——立即重新打开浏览器 → 过登录闸门 → 重新开动态页开始获取动态 → 进入模拟用户行为。 |
-| `reload` | 热重启 | 结束当前上线周期，**重载人格配置**后立即重新上线（跳过下线休息）。改 `data/personas/*.json`（人格 / `fetch_targets` 蹲饼目标）后用此令生效。 |
+| `reload` | 热重启 | 结束当前上线周期，**重载人格配置**后立即重新上线（跳过下线休息）。改 `data/personas/*.json`（人格）后用此令生效。 |
 | `record on` / `record off` | 蹲饼录屏开关 | 开关蹲饼录屏（CDP screencast → `logs/screencast/`，用于回放定位「取不到新动态」原因）；写回 `config-app.json5` 的 `fetch_recording`，重启后仍生效。输入 `record` 查询当前开关状态。 |
 | `status` | 状态快照 | 打印：人格 / 上线次数 / 任务统计 / 生成器主状态 / 当前页面 URL / 标签页 / 上一任务 / 登录态 / 被动蹲饼已抓动态 / 控制标志。 |
 | `help` | 帮助 | 列出全部可用指令。 |
@@ -132,7 +132,7 @@ await runPersonaEngine({
 | --- | --- |
 | `sim on` | **从零打开**模拟行为（重置生成器状态机） |
 | `sim off` | **彻底结束**模拟行为（阻塞生成器 → 持续式任务收尾 → 清理页面） |
-| `fetch on` | 打开蹲饼（目标 UP 对齐 → 动态页 → 初次获取 → 守护） |
+| `fetch on` | 打开蹲饼（动态页 → 初次获取 → 守护） |
 | `fetch off [close]` | 关闭蹲饼（保留监听与增量基线，便于快速重开；加 `close` 同时关闭动态页标签） |
 | `follow <uid> [no-hold]` | **主动关注 UP**（独立操作，不进任务流；`no-hold` 连「暂停生成新任务」也不做） |
 | `login` | 确保登录（未登录则扫码） |
@@ -162,15 +162,20 @@ await kernel.followUp('161775300', { holdTasks: false }); // 完全不干预任�
 ```
 
 > `FollowUpTarget = { uid: string }`；`FollowUpResult` 为**平铺结构**：`{ uid, name, status, detail? }`（不含嵌套 target）。
-> 蹲饼目标对齐（`syncFetchTargets`）返回的 `FetchTargetReport` 同样带 `uid` / `name`（主页实际读取值）。
 
-> 与蹲饼目标对齐（`syncFetchTargets`）的区别：后者在**主操作页**上导航，只应在启动阶段调用；
-> 本功能随时可用（含模拟运行中），不会影响任务流。
+> 与蹲饼的关系：蹲饼**不再依赖人格配置的目标 UP**，直接采集**关注流全部 UP** 的动态。
+> 想让某个 UP 进入蹲饼范围，用 `follow` 指令（`kernel.followUp()`）关注即可，无需改人格配置。
+
+> 与蹲饼的关系：蹲饼直接采集**关注流全部 UP**的动态，无需配置目标；新增关注用 `follow` 指令即可。
 
 ## 蹲饼数据格式（出口 = B 站接口原始数据）
 
 蹲饼的出口数据**就是 B 站动态流接口 `data.items[]` 的原始对象**（不裁剪、不改名、不合成字段），
 字段与接口完全一致，宿主可直接按 B 站字段使用：
+
+> **蹲饼不做任何筛选**：一次出口可能包含 **关注流里任意多个 UP**（含哔哩哔哩会员购/国创等系统类账号）的动态，
+> 只做「增量去重」（已投递过的不再重复投递）。按 UP / 关键词 / 类型筛选**由外部调用方自行完成**——
+> UP 信息就在原始 item 里（`item.modules.module_author` 的 `mid` / `name`，或用 `dynAuthor(item)` 取 `{ uid, name }`）。
 
 | 出口 | 数据 |
 | --- | --- |
@@ -256,7 +261,7 @@ onEnd(context, outcome)    ③ 结束处理：生成「后一个状态」（Task
 
 ## 人格配置字段说明（data/personas/*.json）
 
-人格 = 养号行为 + 蹲饼目标的「人设」。按 `{personaDir}/{personaId}.json` 查找（**personaId = 文件名**），
+人格 = 养号行为的「人设」，**不含蹲饼目标**（蹲饼固定采集关注流全部 UP 的动态）。按 `{personaDir}/{personaId}.json` 查找（**personaId = 文件名**），
 加载时会与 `src/persona/defaults.ts` 的默认值**深层合并**，缺省字段自动兜底——只需写想改的字段。
 示例：`data/personas/ak-night-worker.json`（包内）；主项目可放自己的 `data/personas/` 并用 `personaDir` 指向。
 
@@ -269,16 +274,14 @@ onEnd(context, outcome)    ③ 结束处理：生成「后一个状态」（Task
 | `state_transition_bias` | object | **状态转移偏置**（人格差异根源）：`from状态 → { to状态: 乘性系数 }`，稀疏、缺省 1.0=常人；调制 BASE_MATRIX 后归一化，马尔科夫游走据此涌现行为序列 |
 | `initial_state_dist` | object | 上线起点分布：`状态名 → 概率`（替代「目的→入口」） |
 | `interests` | object | 兴趣偏置（内容相关度） |
-| `fetch_targets` | array | **蹲饼目标 UP**（指向性动态获取）：`[{ uid?, name }]`。引擎登录后确保关注这些 UP，其动态被定向捕获/投递 |
 
 `interests`：
 - `keywords: string[]` —— 搜索/内容偏好关键词
-- `up_uid_affinity: Array<{ uid?, name }>` —— 关注的 UP（名字为主、uid 可选）
+- `up_uid_affinity: Array<{ uid?, name }>` —— 感兴趣的 UP（名字为主、uid 可选）
 - `category_bias: Record<tname, number>` —— 分区(如「游戏」)权重
 
-`fetch_targets`（蹲饼指向性）：
-- 数组元素 `{ uid, name }`，**uid 优先**（直接进主页关注）；name 用于展示
-- 引擎启动/重载时注入 passive-fetch：非空时**只捕获/投递这些 UP 的动态**；空数组 = 不过滤（捕获关注流全部）
+> 蹲饼**不读人格配置**：直接采集**关注流全部 UP** 的动态。新增/取消关注请用 `follow` 指令
+> （内核 `kernel.followUp(uid)`），改人格不影响蹲饼范围。
 
 ### `behavior` —— 行为习惯（多数 0..1 概率或区间）
 

@@ -6,9 +6,13 @@
  * （web-dynamic/v1/feed/all 初始加载 与 /feed/all/update 轮询更新），从响应 JSON 中提取动态数据。
  * 动态页在后台照常轮询，无需人工介入，也不占任务坑位。
  *
- * 数据出口：拦截到的动态**不保留**——
+ * 数据出口：拦截到的动态**原样透传、不做任何筛选**——
+ * - 输出为 B 站接口 `data.items[]` 的**原始动态对象**（未裁剪/未改名），内含 UP 信息
+ *   （`modules.module_author`：UP 的 uid / 名称 / 头像，见 `dynAuthor()`）；
+ * - **筛选（按 UP / 关键词 / 类型…）完全由外部调用方决定**，蹲饼只保证「原始 + 含 UP 信息」；
  * - 配置了外发接口（`setFetchReportConfig` 且 enable=true）→ 每次拦截到一批就 POST 给外部项目；
- * - 未配置外发接口 → 提炼基本信息（作者/时间/文案）追加写入本地文档 `logs/fetched-dynamics.md`。
+ * - 未配置外发接口 → 提炼基本信息（作者/时间/文案）追加写入本地文档 `logs/fetched-dynamics.md`；
+ * - 模块接入方可用 `setDynamicListener()` / `onDynamics` 直接接收原始数组，自行筛选。
  * 内存 `collected` 仅作运行期观察（status 展示）。
  *
  * 使用（bilibili-user-simulation 集成）：
@@ -146,36 +150,12 @@ export interface FetchReportConfig {
 /** 当前外发配置（默认关闭） */
 let reportConfig: FetchReportConfig = { enable: false, url: '', batchSize: 50 };
 
-/** 蹲饼目标 UP（指向性）：非空时只捕获/投递这些作者的动态 */
-let targetUids = new Set<string>();
-let targetNames = new Set<string>();
-
-/** 注册蹲饼目标（引擎从 persona.fetch_targets 设置）；传空 = 不过滤（捕获关注流全部动态） */
-export function setFetchTargets(targets: Array<{ uid?: string; name?: string }>): void {
-  targetUids = new Set<string>();
-  targetNames = new Set<string>();
-  for (const t of targets ?? []) {
-    if (t?.uid) {
-      targetUids.add(String(t.uid));
-    }
-    if (t?.name) {
-      targetNames.add(String(t.name));
-    }
-  }
-}
-
-/** 该动态是否属于蹲饼目标（未配置目标时恒 true = 全收） */
-function isTargetDynamic(item: BiliDynamicItem): boolean {
-  if (targetUids.size === 0 && targetNames.size === 0) {
-    return true;
-  }
-  const { uid, name } = dynAuthor(item);
-  return targetUids.has(uid) || targetNames.has(name);
-}
-
 /**
  * 动态监听回调：主项目以「模块」方式接入时注册，模块内部每次捕获到一批动态即回调。
- * `items` 为**B 站原始动态对象数组**（与接口 `data.items[]` 一致，未做裁剪）。
+ *
+ * `items` 为**B 站原始动态对象数组**（与接口 `data.items[]` 一致，未做裁剪、**未做任何筛选**）：
+ * 一次回调可能包含**任意多个关注 UP** 的动态（包含系统类账号），筛选（只关心某些 UP 等）由监听方自行处理。
+ * UP 信息在 `item.modules.module_author`（可用 `dynAuthor(item)` 取 `{ uid, name }`）。
  * kind: 'INIT' 初始加载 / 'UPDATE' 轮询更新。注册后动态交给监听器（不再自动外发/落盘）。
  */
 export type DynamicListener = (items: BiliDynamicItem[], kind: 'INIT' | 'UPDATE') => void;
@@ -437,8 +417,9 @@ function latestOf(dynamics: BiliDynamicItem[]): BiliDynamicItem | undefined {
 /**
  * 从动态流接口响应 JSON 中提取**原始动态列表**（与接口 `data.items[]` 一致，原样透传，
  * 不裁剪/不改名/不合成字段）。
+ * 蹲饼采集**关注流全部 UP** 的动态；**不做任何筛选**（不按 UP / 关键词 / 类型过滤），
+ * 筛选由外部调用方自行处理。想跟进新的 UP 用 `follow` 指令关注即可。
  * - `code !== 0` 或 `items` 非数组 → 返回 `[]`；
- * - 配置了蹲饼目标（`fetch_targets`）时只保留目标作者的动态；
  * - 解析失败不抛错。
  */
 export function extractDynamicsFromPayload(payload: unknown): BiliDynamicItem[] {
@@ -447,11 +428,7 @@ export function extractDynamicsFromPayload(payload: unknown): BiliDynamicItem[] 
     if (root?.code !== 0 || !Array.isArray(root.data?.items)) {
       return [];
     }
-    const items = (root.data!.items as unknown[]).filter((it): it is BiliDynamicItem => !!it && typeof it === 'object');
-    if (targetUids.size > 0 || targetNames.size > 0) {
-      return items.filter(isTargetDynamic);
-    }
-    return items;
+    return (root.data!.items as unknown[]).filter((it): it is BiliDynamicItem => !!it && typeof it === 'object');
   } catch {
     return [];
   }
@@ -1072,7 +1049,10 @@ export async function ensureDynamicPage(context: TaskContext): Promise<Page | nu
   }
 }
 
-/** 已收集的全部动态（**B 站原始 item**，最新在前） */
+/**
+ * 已收集的全部动态（**B 站原始 item**，最新在前，**未做任何筛选**；UP 信息在 `modules.module_author`）。
+ * 筛选/过滤请由调用方基于返回的原始数据自行完成。
+ */
 export function getCollectedDynamics(): BiliDynamicItem[] {
   return [...collected].reverse();
 }

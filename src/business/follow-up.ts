@@ -1,18 +1,62 @@
 /**
  * 主动关注 UP —— 独立于模拟任务流的一次性操作。
  *
- * 与「蹲饼目标对齐」（`target-sync.ts`，会在**主操作页**上导航、因此只能在启动阶段调用）不同，
- * 本模块的写操作全部发生在**调用方提供的独立页面**上：
+ * 属性：
  * - 内核 `followUp()` 会新开一个**临时标签页**完成关注，结束后立即关闭；
  * - 全程不改动主操作页（`ctx.page`）、不中断正在执行的任务、不进入任务队列（生成器与执行器都不参与）。
+ *
+ * 蹲饼不再依赖人格配置的「目标 UP」：蹲饼直接采集**关注流全部 UP**的动态，
+ * 想让某个 UP 进入关注流，用 `follow` 指令（`kernel.followUp()`）关注即可。
  */
 import { createContext } from '../action/execute/context';
 import { FollowTask } from '../action/task';
-import { readFollowState } from './target-sync';
 import { extractUpProfileInfo } from '../utils/bilibili-dom';
 import type { Page } from 'puppeteer-core';
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+
+/** UP 主页「关注按钮」候选选择器（取第一个可见者判断状态/点击） */
+const FOLLOW_SELECTORS = [
+  '.header-info-ctnr .follow-btn',
+  '.bili-header__info .follow-btn',
+  '.space-header .follow-btn',
+  '.default-btn.follow-btn',
+  '.follow-btn',
+];
+
+/** 关注按钮状态：followed（已关注）/ not-followed（可关注）/ unknown（找不到/无法判定） */
+export type FollowState = 'followed' | 'not-followed' | 'unknown';
+
+/** 判断当前页（应为目标 UP 主页）的关注状态：读「关注按钮」的 class / 文案 */
+export async function readFollowState(page: Page): Promise<FollowState> {
+  try {
+    const s = (await page.evaluate((sels) => {
+      for (const sel of sels) {
+        for (const el of Array.from(document.querySelectorAll<HTMLElement>(sel))) {
+          const r = el.getBoundingClientRect();
+          if (r.width < 2 || r.height < 2) {
+            continue; // 跳过不可见元素
+          }
+          const text = (el.textContent ?? '').trim();
+          const cls = typeof el.className === 'string' ? el.className : '';
+          if (/followed|已关注|已互关/i.test(cls) || /已关注|已互关/.test(text)) {
+            return { followed: true };
+          }
+          if (/not-follow|未关注/i.test(cls) || /^关注| 关注/.test(text) || /^关注/.test(text)) {
+            return { followed: false };
+          }
+        }
+      }
+      return { followed: null };
+    }, FOLLOW_SELECTORS)) as { followed: boolean | null };
+    if (s.followed === null) {
+      return 'unknown';
+    }
+    return s.followed ? 'followed' : 'not-followed';
+  } catch {
+    return 'unknown';
+  }
+}
 
 /** 关注目标 */
 export interface FollowUpTarget {
