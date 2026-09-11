@@ -4,7 +4,7 @@
 
 - `src/persona/` ① 人格管理（任务概率调控：transition 马尔科夫 / circadian / loader）
 - `src/action/` ② 行为执行（生成器 PersonaDrivenGenerator + 执行器 TaskExecutor + 14 任务）
-- `src/business/` ③ 蹲饼分发（passive-fetch 被动监听动态流 / fetch-coordinator 协调 / record 录屏）
+- `src/business/` ③ 蹲饼分发（passive-fetch 被动监听动态流 / fetch-coordinator 协调 / follow-up 主动关注 UP / record 录屏）
 - `src/kernel/` ④ **内核（SimulationKernel）**：全局静态单例，初始化（开浏览器并登录）后按需**独立开关**模拟行为 / 蹲饼，并支持指令控制
 
 运行语义：真实时间（无加速）· 无时长上限 · 无限循环直到 Ctrl+C。运行数据（人格/登录态/logs/配置）
@@ -162,11 +162,9 @@ await kernel.followUp('161775300', { holdTasks: false }); // 完全不干预任�
 ```
 
 > `FollowUpTarget = { uid: string }`；`FollowUpResult` 为**平铺结构**：`{ uid, name, status, detail? }`（不含嵌套 target）。
-
-> 与蹲饼的关系：蹲饼**不再依赖人格配置的目标 UP**，直接采集**关注流全部 UP** 的动态。
-> 想让某个 UP 进入蹲饼范围，用 `follow` 指令（`kernel.followUp()`）关注即可，无需改人格配置。
-
-> 与蹲饼的关系：蹲饼直接采集**关注流全部 UP**的动态，无需配置目标；新增关注用 `follow` 指令即可。
+>
+> 与蹲饼的关系：蹲饼**不依赖任何「目标 UP」配置**（人格里也没有该字段），直接采集**关注流全部 UP** 的动态。
+> 想让某个 UP 进入蹲饼范围，用 `follow` 指令（`kernel.followUp()`）关注即可；筛选动态由调用方自行处理。
 
 ## 蹲饼数据格式（出口 = B 站接口原始数据）
 
