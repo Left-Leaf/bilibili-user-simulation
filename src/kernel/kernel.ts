@@ -440,10 +440,19 @@ export class SimulationKernel {
       this.fetchTargetsSynced = true;
     }
 
+    // 蹲饼开启期间**禁止长休息**：长休息会关闭浏览器 / 长时间停止活动，会使蹲饼失效；
+    // 生成侧（Rest 注册表与 BROWSER_CLOSED 分支）据此把长休息权重置 0。
+    fetchCoordinator.setLongRestDisabled(true);
+    // 若此刻模拟正在「长休息」→ 先停止它，再开蹲饼，然后继续后续流程
+    await this.stopOngoingLongRest();
+
     setFetchEnabled(true);
     // 立即置运行标志：后面的「打开动态页 + 等初次获取」可能耗时数十秒，
     // 期间其它指令（如 sim off 的页面清理）必须能感知到「蹲饼已开启，动态页要保留」。
     this.fetchRunning = true;
+
+    // 主操作页可能已失效（如模拟刚结束时的页面清理）→ 重建，保证后续任务/蹲饼有可用页
+    await this.ensureUsablePage().catch(() => {});
 
     const dynPage = await ensureDynamicPage(ctx).catch(() => null);
     if (dynPage) {
@@ -484,6 +493,7 @@ export class SimulationKernel {
     }
     setFetchEnabled(false);
     fetchCoordinator.resume(); // 若关闭瞬间正处于「蹲饼暂停任务流」，解开暂停
+    fetchCoordinator.setLongRestDisabled(false); // 抳销「禁止长休息」：恢复人格原本的长休息概率
 
     if (options.closePage && this.ctx?.browser) {
       const dynPage = await findDynamicPage(this.ctx.browser, this.page ?? undefined).catch(() => null);
@@ -492,6 +502,37 @@ export class SimulationKernel {
 
     this.fetchRunning = false;
     this.log('🛑 蹲饼已关闭（监听保留、增量基线保留，可随时 startFetch() 重开）');
+  }
+
+  /**
+   * 若此刻正处于「长休息」中，先把它停掉（供 startFetch 调用）。
+   *
+   * 语义：模拟开着、蹲饼关着时进了长休息 → 此时开启蹲饼，必须先停止长休息，再开蹲饼。
+   * 机制：`ctx.state.forceOnline` 让 RestTask 的等待循环提前结束（与「强制上线」指令同一机制；
+   * 内核模式下属长休息已降级为「停止活动」，因此可被中断）。
+   */
+  private async stopOngoingLongRest(): Promise<void> {
+    const ctx = this.ctx;
+    if (!ctx) {
+      return;
+    }
+    const current = ctx.state.get('currentRest') as { isLong?: boolean } | undefined;
+    if (!current?.isLong) {
+      return; // 未在长休息（含未在休息）→ 无需处理
+    }
+    this.log('⏹️ 检测到正在长休息：先停止休息，再开启蹲饼…');
+    ctx.state.set('forceOnline', true);
+    const deadline = Date.now() + 20_000;
+    while (Date.now() < deadline) {
+      const cur = ctx.state.get('currentRest') as { isLong?: boolean } | undefined;
+      if (!cur?.isLong) {
+        break;
+      }
+      await sleep(300);
+    }
+    ctx.state.set('forceOnline', false);
+    const still = ctx.state.get('currentRest') as { isLong?: boolean } | undefined;
+    this.log(still?.isLong ? '⚠️ 长休息未能在时限内停止（继续开启蹲饼）' : '✅ 长休息已停止');
   }
 
   /** 动态页守护：动态页丢失/被切走时补开（视频页消费中不打扰） */

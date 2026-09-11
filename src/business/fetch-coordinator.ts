@@ -26,6 +26,11 @@ export const fetchCoordinator = {
    * 供持续式任务在分片检查点感知 → 结束当前任务并收尾，使整个模拟在最后一个任务结束后停止。
    */
   stopRequested: false,
+  /**
+   * 蹲饼开启期间置 true：任务生成侧据此把「长休息」权重置 0。
+   * 长休息会关闭浏览器 / 长时间停止活动，会使蹲饼失效；由内核 startFetch()/stopFetch() 维护。
+   */
+  longRestDisabled: false,
 
   /** executor 每个任务边界调用：暂停期间阻塞，直到 resume */
   async waitIfPaused(): Promise<void> {
@@ -62,6 +67,11 @@ export const fetchCoordinator = {
   /** 清除停止请求（内核在模拟彻底结束后调用，供下次 startSimulation 使用） */
   clearStop(): void {
     fetchCoordinator.stopRequested = false;
+  },
+
+  /** 开关「禁止长休息」（内核在蹲饼开启期间置 true，关闭后恢复） */
+  setLongRestDisabled(disabled: boolean): void {
+    fetchCoordinator.longRestDisabled = disabled;
   },
 };
 

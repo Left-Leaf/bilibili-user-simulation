@@ -201,6 +201,21 @@ id_str, type, visible, basic{}, modules{}, orig
 > 注意：接口中 `update_num`、`pub_ts` 是**字符串**；`pub_time` 是**相对时间**（如「18分钟前」），
 > 需要绝对时间请用 `dynPubTs()`。转发动态的原动态在 `orig`（结构同 item）。
 
+### 蹲饼与「长休息」的联动
+
+长休息会**关闭浏览器 / 长时间停止活动**，会让蹲饼失效，因此内核按以下规则自动联动（无需使用者关心）：
+
+| 条件 | 行为 |
+| --- | --- |
+| 蹲饼**已开启** | 任务生成侧把「长休息」**权重置 0**（`fetchCoordinator.longRestDisabled`）：Rest 注册表的长休息概率强制为 0；状态机采样到 `BROWSER_CLOSED` 也改写为继续浏览 ⇒ **永不长休息**（短休息不受影响） |
+| 蹲饼**关闭**且在长休息中，此时**开启蹲饼** | 先**停止长休息**（用「强制上线」机制中断 Rest 等待循环）→ 再开蹲饼 → 然后继续后续流程 |
+| 蹲饼**关闭** | 恢复人格原本的长休息概率（`setLongRestDisabled(false)`） |
+
+> 内核模式下 `RestTask` 的长休息本身也已降级为「停止活动、浏览器保持打开」（`ctx.state.preventBrowserClose`）；
+> 上面的权重置 0 是更前置的规避手段，两者叠加保证蹲饼不会被长休息打断。
+> 相关实现：`fetch-coordinator.ts`（`longRestDisabled`）、`task-registrations.ts`（Rest 注册表）、
+> `persona-generator.ts`（BROWSER_CLOSED 分支）、`rest.ts`（`ctx.state.currentRest` 标记）、`kernel.startFetch()`。
+
 ## 人格配置字段说明（data/personas/*.json）
 
 人格 = 养号行为 + 蹲饼目标的「人设」。按 `{personaDir}/{personaId}.json` 查找（**personaId = 文件名**），

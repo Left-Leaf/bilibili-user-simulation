@@ -48,10 +48,12 @@ export class RestTask extends BaseTask {
   async execute(context: TaskContext): Promise<TaskResult> {
     const { durationMs } = this.input;
     const threshold = this.input.closeBrowserAfterMs ?? 10 * 60 * 1000; // 默认 10 分钟
+    // 任务一开始就根据休息时长决定：长休息 = 关闭浏览器下线；短休息 = 停止活动（浏览器保持打开）
+    const isLong = durationMs > threshold;
+    // 标记「当前正在休息」：内核在开启蹲饼前会据此中断正在进行的**长休息**（见 kernel.startFetch）
+    context.state.set('currentRest', { isLong, durationMs, startedAt: Date.now() });
 
     try {
-      // 任务一开始就根据休息时长决定：长休息 = 关闭浏览器下线；短休息 = 停止活动（浏览器保持打开）
-      const isLong = durationMs > threshold;
       // 内核模式（context.state.preventBrowserClose=true）：内核没有「关浏览器 → 离线等待 → 重新上线」的编排，
       // 因此长休息降级为「停止活动」（浏览器保持打开），避免任务关掉浏览器后内核失去会话
       const keepBrowserOpen = context.state.get('preventBrowserClose') === true;
@@ -94,10 +96,12 @@ export class RestTask extends BaseTask {
         // 强制上线：立即结束短休息、不关浏览器、继续上线
         if (context.state.get('forceOnline') === true) {
           context.state.set('forceOnline', false);
-          this.log(`🚀 收到强制上线指令，提前结束短休息（已休息 ${(elapsed / 1000).toFixed(0)}s），立即上线`);
+          this.log(`🚀 收到强制上线指令，提前结束休息（已休息 ${(elapsed / 1000).toFixed(0)}s），立即上线`);
           return {
             success: true,
             data: { durationMs, interrupted: true, closedBrowser: false, elapsed },
+            // 回首页继续：否则生成器内部状态会滞留在 BROWSER_CLOSED，导致任务流被判定「已下线」而结束
+            nextState: MainState.HOME_FEED,
           };
         }
         const step = Math.min(FORCE_ONLINE_CHECK_MS, durationMs - elapsed);
@@ -125,6 +129,8 @@ export class RestTask extends BaseTask {
         error: `休息任务失败: ${(error as Error).message}`,
         data: { durationMs },
       };
+    } finally {
+      context.state.delete('currentRest'); // 休息结束：清除标记
     }
   }
 }

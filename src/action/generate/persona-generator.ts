@@ -245,7 +245,14 @@ export class PersonaDrivenGenerator implements TaskGenerator {
 
   async hasNext(context: TaskContext): Promise<boolean> {
     if (this.currentState === MainState.BROWSER_CLOSED) {
-      return false;
+      // 以上下文实时状态校正：长休息被「强制上线」中断后应继续上线，
+      // 而不是因内部状态滞留 BROWSER_CLOSED 判定「已下线」结束任务流
+      const actual = context.currentState;
+      if (actual !== MainState.BROWSER_CLOSED && MAIN_STATES.includes(actual as MainState)) {
+        this.currentState = actual as MainState;
+      } else {
+        return false;
+      }
     }
     if (this.taskCount >= this.options.maxTasks) {
       return false;
@@ -399,9 +406,15 @@ export class PersonaDrivenGenerator implements TaskGenerator {
     // （longRestMs 判定），统一「下线」语义，避免直接 return null 造成「莫名下线 + 离线时长重采样」。
     // 时长恒 > 10min 长休息阈值（沿用 Rest 注册表长休息区间 30~120min）。
     if (nextState === MainState.BROWSER_CLOSED) {
-      this.currentState = nextState;
-      console.log('   😴 状态采样到 BROWSER_CLOSED，生成长休息任务（关闭浏览器下线）');
-      return new RestTask({ durationMs: (30 + Math.random() * 90) * 60_000 });
+      if (fetchCoordinator.longRestDisabled) {
+        // 蹲饼开启期间禁止长休息（长休息会关浏览器下线，使蹲饼失效）→ 改写为继续浏览
+        console.log('   🥞 蹲饼已开启：跳过「下线（长休息）」，继续浏览');
+        nextState = MainState.HOME_FEED;
+      } else {
+        this.currentState = nextState;
+        console.log('   😴 状态采样到 BROWSER_CLOSED，生成长休息任务（关闭浏览器下线）');
+        return new RestTask({ durationMs: (30 + Math.random() * 90) * 60_000 });
+      }
     }
 
     // 检测当前页面能力特征（任务概率统一 gate：入口可用性 + 视频标签）

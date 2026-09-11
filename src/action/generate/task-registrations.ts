@@ -14,6 +14,7 @@ import { CommentTask } from '../task/comment';
 import { FollowTask } from '../task/follow';
 import { CloseVideoTask } from '../task/close-video';
 import { RestTask } from '../task/rest';
+import { fetchCoordinator } from '../../business/fetch-coordinator';
 import { LoginTask } from '../task/login';
 import { LogoutTask } from '../task/logout';
 import { restProbability, onlineMinutesAt } from '../../sim/rest-decision';
@@ -369,7 +370,11 @@ export function registerAllTasks(): void {
       const circ = ctx.persona.circadian;
       const will = circ ? willingnessAt(hour, circ) : 0.5;
       const sleeping = circ ? inSleep(hour, circ) : false;
-      const longRestProb = sleeping ? 1 : 0.4 * (1 - will); // 非睡眠：意愿 0→0.4，意愿 1→0
+      const longRestProb = fetchCoordinator.longRestDisabled
+        ? 0 // 蹲饼开启期间：长休息权重置 0（长休息会关浏览器/长期停止活动，使蹲饼失效）
+        : sleeping
+          ? 1
+          : 0.4 * (1 - will); // 非睡眠：意愿 0→0.4，意愿 1→0
       const longRest = Math.random() < longRestProb;
       const restMs = longRest
         ? sleeping
