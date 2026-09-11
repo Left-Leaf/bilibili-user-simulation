@@ -33,3 +33,6 @@ export type { BiliDynamicItem, DynamicListener } from '../business/passive-fetch
 // 主动关注 UP（独立操作，不进任务流）
 export { followUpOnPage } from '../business/follow-up.js';
 export type { FollowUpResult, FollowUpTarget } from '../business/follow-up.js';
+
+// 页面运行时 shim（运行器兼容，如 tsx / esbuild keepNames）
+export { installPageRuntimeShim, attachPageRuntimeShim } from '../utils/page-runtime.js';

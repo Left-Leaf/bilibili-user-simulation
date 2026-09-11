@@ -54,3 +54,8 @@ export { setFetchEnabled, isFetchEnabled } from './business/passive-fetch.js';
 // 主动关注 UP（独立操作，不进入模拟任务流；内核已封装 kernel.followUp()）
 export { followUpOnPage } from './business/follow-up.js';
 export type { FollowUpResult, FollowUpTarget } from './business/follow-up.js';
+
+// 页面运行时 shim（运行器兼容）：宿主自建页面并立即 page.evaluate 时先调用它，
+// 避免 tsx / esbuild keepNames 注入的 __name 在页面里未定义导致回调报错
+// （库内已由 OpenBrowserBehavior 自动覆盖所有自有页面）
+export { installPageRuntimeShim, attachPageRuntimeShim } from './utils/page-runtime.js';

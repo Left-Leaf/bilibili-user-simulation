@@ -104,6 +104,8 @@ await runPersonaEngine({
   见下「蹲饼数据格式」），不再读 `config-app.json5` 自动外发/写本地文档（出口由主项目决定）。
 - 也可直接 `setDynamicListener(fn)` / `loadPersonaFromFile(path)`（见 `src/index.ts` 导出）。
 - 可运行示例：`ts-node run/example-module.ts <人格JSON路径>`。
+- 宿主自建页面时：`installPageRuntimeShim(page)` / `attachPageRuntimeShim(browser)` 也从库入口导出
+  （见下文「运行器兼容」）。
 
 ### 运行器兼容（tsx / esbuild `keepNames`）
 
@@ -114,7 +116,8 @@ tsx 等基于 esbuild 且开启 `keepNames` 的运行器，会把回调里的**�
 
 库已在**浏览器启动时给每个页面注入同名 shim**（`src/utils/page-runtime.ts`：`evaluateOnNewDocument`
 + `evaluate` + `targetcreated` 监听，纯字符串下发、幂等），因此 tsx / ts-node / 编译产物都能正常 `evaluate`，
-使用者无需额外处理。新增标签页会自动覆盖；创建页面后若立即 `evaluate`，请先 `installPageRuntimeShim(page)`。
+使用者无需额外处理。新增标签页会自动覆盖；创建页面后若立即 `evaluate`，请先 `installPageRuntimeShim(page)`
+（两个函数已从库入口 / 内核入口导出）。
 
 ## 运行时指令（stdin）
 
@@ -331,6 +334,7 @@ onEnd(context, outcome)    ③ 结束处理：生成「后一个状态」（Task
 ```
 src/      库源码（index.ts = 库入口）
 src/kernel/   内核（SimulationKernel 单例 + commands 指令系统）
+src/utils/    页面工具：bilibili-dom（DOM 提取）/ page-runtime（运行器兼容 shim）/ paths
 run/      example 启动入口：run-headless/run-headed（全自动引擎）、run-kernel（内核模式·指令控制）、
           example-module（模块用法示例）、persona-engine.ts（引擎实现，双模式共用）
 data/personas/  内置人格（ak-night-worker.json）
