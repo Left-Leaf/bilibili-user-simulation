@@ -1,4 +1,4 @@
-import { BaseTask, TaskResult } from './base';
+import { BaseTask, type TaskController, type TaskResult } from './base';
 import type { TaskContext } from '../execute/context';
 import { MainState } from '../engine/state';
 import { LeftClickBehavior, KeyPressBehavior, ScrollBehavior, SleepBehavior } from '../behavior';
@@ -11,7 +11,6 @@ import {
   getPlayerPlaybackState,
   isVideoPageUrl,
 } from '../../utils/bilibili-dom';
-import { fetchCoordinator } from '../../business/fetch-coordinator';
 
 /** 观看视频任务的输入：由生成器（决策层）在拿到 OpenVideo 结果后提供。 */
 export interface WatchVideoInput {
@@ -65,7 +64,23 @@ export class WatchVideoTask extends BaseTask {
     }
   }
 
-  async execute(context: TaskContext): Promise<TaskResult> {
+  /**
+   * ② 执行：持续性任务 → 返回控制器。
+   * 异步进程只表示「是否结束」；数据结果与落点写入任务状态，由 ③ 结束函数（onEnd）读取并生成后一个状态。
+   */
+  async execute(context: TaskContext): Promise<TaskController> {
+    const ctrl = this.createController(context);
+    void this.run(context, ctrl);
+    return ctrl;
+  }
+
+  /** 中断处理（由 controller.abort() 调用） */
+  async onInterrupt(): Promise<void> {
+    this.log('⚡ 收到中断（蹲饼让位 / 停止模拟），结束观看');
+  }
+
+  /** 任务主体：只「做事 + 记录数据 + 声明落点」，不生成状态 */
+  private async run(context: TaskContext, ctrl: TaskController): Promise<void> {
     const steps: TaskResult[] = [];
     try {
       // 行为1：确定视频播放（存在 video 元素且未暂停）
@@ -121,18 +136,25 @@ export class WatchVideoTask extends BaseTask {
       const watchStart = Date.now();
       let i = 0;
       while (Date.now() - watchStart < durationMs) {
-        // 停止请求（内核 sim off）：持续式观看任务在此检查点收尾结束（否则要等整段视频看完）。
+        // 中断（内核 sim off / 蹲饼让位）：持续性观看任务在此检查点收尾结束（否则要等整段视频看完）。
         // 任务结束后生成器不再产生新任务 → 整个模拟在最后一个任务完成后停止。
-        if (fetchCoordinator.stopRequested) {
-          this.log('⏹️ 收到停止请求，结束观看并收尾');
-          return {
-            success: false,
-            interrupted: true,
-            reason: 'stop-requested',
-            data: { durationMs: Math.round(Date.now() - watchStart), stopRequested: true },
-          };
+        await ctrl.waitIfPaused();
+        if (ctrl.aborted) {
+          this.log('⏹️ 收到中断，结束观看并收尾');
+          this.finishWith({
+            success: true,
+            data: { durationMs: Math.round(Date.now() - watchStart), interrupted: true },
+          });
+          return;
         }
-        await new SleepBehavior(checkInterval).execute(context);
+        if (!(await ctrl.dwell(checkInterval))) {
+          this.log('⏹️ 收到中断，结束观看并收尾');
+          this.finishWith({
+            success: true,
+            data: { durationMs: Math.round(Date.now() - watchStart), interrupted: true },
+          });
+          return;
+        }
         i++;
         // 同步播放进度状态：每次检查都从播放器读取当前已播放时长 / 总时长
         const player = await getPlayerPlaybackState(context.page!).catch(() => null);
@@ -161,25 +183,26 @@ export class WatchVideoTask extends BaseTask {
         }
       }
 
-      return {
-        success: true,
-        data: {
-          durationMs: Math.round(Math.min(durationMs, Date.now() - watchStart)),
-          videoDuration: progress.totalDuration,
-          completed, // 是否因视频播放完成而提前结束
-          fullscreen: this.input.fullscreen,
-          steps: steps.length,
-          // 秒关标记：生成器据此触发 CloseVideo 关闭视频标签页（避免视频残留继续播放）
-          quickClose: earlyExit,
+      // 执行阶段结束：记录数据 + 声明落点（后一个状态由 onEnd 生成）
+      this.finishWith(
+        {
+          success: true,
+          data: {
+            durationMs: Math.round(Math.min(durationMs, Date.now() - watchStart)),
+            videoDuration: progress.totalDuration,
+            completed, // 是否因视频播放完成而提前结束
+            fullscreen: this.input.fullscreen,
+            steps: steps.length,
+            // 秒关标记：生成器据此触发 CloseVideo 关闭视频标签页（避免视频残留继续播放）
+            quickClose: earlyExit,
+          },
         },
-        nextState: MainState.CONTENT_CONSUMING,
-      };
+        MainState.CONTENT_CONSUMING
+      );
     } catch (error) {
-      return {
-        success: false,
-        error: `观看视频失败: ${(error as Error).message}`,
-        data: { steps: steps.length },
-      };
+      this.finishWith({ success: false, error: `观看视频失败: ${(error as Error).message}`, data: { steps: steps.length } });
+    } finally {
+      ctrl.finish(); // 任务主体结束 → 结束异步进程（执行器随后调用 ③ 结束处理）
     }
   }
 

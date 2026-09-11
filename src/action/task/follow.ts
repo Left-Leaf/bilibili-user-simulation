@@ -54,7 +54,8 @@ export class FollowTask extends BaseTask {
       }
 
       this.log(`➕ 已关注: ${page.url().slice(0, 60)}`);
-      return { success: true, data: { steps: steps.length }, nextState: MainState.USER_PROFILE };
+      this.setNextState(MainState.USER_PROFILE);
+      return { success: true, data: { steps: steps.length } };
     } catch (error) {
       return { success: false, error: `关注失败: ${(error as Error).message}`, data: { steps: steps.length } };
     }

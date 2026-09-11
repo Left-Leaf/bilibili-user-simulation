@@ -131,7 +131,8 @@ export class CommentTask extends BaseTask {
         this.log('⚠️ 未在前 20 条评论中找到刚发的评论（可能仍在加载或未成功发出）');
       }
 
-      return { success: true, data: { text, verified, steps: steps.length }, nextState: MainState.CONTENT_CONSUMING };
+      this.setNextState(MainState.CONTENT_CONSUMING);
+      return { success: true, data: { text, verified, steps: steps.length } };
     } catch (error) {
       return { success: false, error: `评论失败: ${(error as Error).message}`, data: { steps: steps.length } };
     }

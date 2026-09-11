@@ -89,10 +89,10 @@ export class TripleTask extends BaseTask {
       if (done === 0) {
         return { success: false, error: `三连失败：${results.join(', ')}` };
       }
+      this.setNextState(MainState.CONTENT_CONSUMING);
       return {
         success: true,
         data: { done, total: actions.length, results },
-        nextState: MainState.CONTENT_CONSUMING,
       };
     } catch (error) {
       return { success: false, error: `三连失败: ${(error as Error).message}`, data: { results } };

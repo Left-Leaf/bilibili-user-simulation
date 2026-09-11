@@ -310,6 +310,7 @@ export class OpenVideoTask extends BaseTask {
       `▶ 已打开视频页: ${bvFromUrl(videoUrl) || '无BV'}「${title.slice(0, 24)}」总长 ${duration.toFixed(0)}s${pageInfo?.upName ? `｜UP: ${pageInfo.upName}` : ''}${pageInfo?.viewCount ? `｜播放 ${pageInfo.viewCount}` : ''}｜推荐 ${recommendations.length} 个${viaRecommend ? '（推荐连刷）' : ''}`
     );
 
+    this.setNextState(MainState.CONTENT_CONSUMING);
     return {
       success: true,
       data: {
@@ -324,7 +325,6 @@ export class OpenVideoTask extends BaseTask {
         recommendations,
         steps: steps.length,
       },
-      nextState: MainState.CONTENT_CONSUMING,
     };
   }
 

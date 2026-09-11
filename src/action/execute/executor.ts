@@ -1,4 +1,4 @@
-import { TaskStatus, type Task, type TaskResult } from '../task/base';
+import { isTaskController, TaskStatus, type Task, type TaskResult } from '../task/base';
 import type { TaskGenerator } from '../generate/generator';
 import { TaskEvent } from './context';
 import type { TaskContext } from './context';
@@ -206,9 +206,63 @@ export class TaskExecutor {
       console.log(`   状态: ${this.context.currentState}`);
     }
 
+    let phaseError: unknown = null;
+    let outcome: TaskResult | undefined = undefined;
+    let aborted = false;
+
     try {
-      const result = await task.execute(this.context);
-      const normalized = this.normalizeResult(result);
+      // ===== ① 开始处理：载入「前一个状态」（固定调用）=====
+      await task.onStart(this.context);
+
+      // ===== ② 执行：只做事，不生成状态 =====
+      const execution = await task.execute(this.context);
+
+      if (isTaskController(execution)) {
+        // ②b 持续性任务：登记控制器（供蹲饼让位 / 内核停止模拟请求中断）——
+        //     异步进程只表示「任务是否结束」（不带结果）；结果存在任务状态里，③ 阶段获取
+        aborted = execution.aborted;
+        fetchCoordinator.currentController = execution;
+        try {
+          await execution.done;
+        } finally {
+          fetchCoordinator.currentController = null;
+          aborted = execution.aborted;
+        }
+        outcome = (task.getResult?.() ?? undefined) as TaskResult | undefined;
+      } else {
+        // ②a 一次性任务：执行产物即结果
+        outcome = execution;
+      }
+    } catch (error) {
+      fetchCoordinator.currentController = null;
+      phaseError = error;
+    }
+
+    // ===== ③ 结束处理：生成「后一个状态」（固定调用，即使 ② 异常也会执行）=====
+    try {
+      let ended: TaskResult | undefined = undefined;
+      try {
+        ended = (await task.onEnd(this.context, outcome)) ?? undefined;
+      } catch (error) {
+        if (!phaseError) {
+          phaseError = error;
+        }
+      }
+
+      if (phaseError) {
+        throw phaseError;
+      }
+
+      const finalResult: TaskResult =
+        ended ??
+        outcome ??
+        ({
+          success: !aborted,
+          status: aborted ? TaskStatus.INTERRUPTED : TaskStatus.SUCCESS,
+          interrupted: aborted,
+        } satisfies TaskResult);
+
+      const normalized = this.normalizeResult(finalResult);
       // 事件时长 = 真实耗时（无时间模拟/加速）
       const realEnd = Date.now();
       log.duration = realEnd - realStart;
@@ -217,6 +271,7 @@ export class TaskExecutor {
       log.metadata = normalized.data;
 
       if (normalized.nextState) {
+        // 后一个状态（由任务的「结束函数」生成）→ 写入上下文，供下一个任务的「开始函数」载入
         this.context.currentState = normalized.nextState;
         if (this.options.verbose) {
           console.log(`   → 状态转移: ${normalized.nextState}`);
@@ -237,6 +292,7 @@ export class TaskExecutor {
         log.error = normalized.error ?? normalized.reason;
       }
     } catch (error) {
+      fetchCoordinator.currentController = null;
       const realEnd = Date.now();
       log.duration = realEnd - realStart;
       log.success = false;

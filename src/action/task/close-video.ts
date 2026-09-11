@@ -68,10 +68,10 @@ export class CloseVideoTask extends BaseTask {
               : isVideoPageUrl(curUrl)
                 ? MainState.CONTENT_CONSUMING
                 : MainState.HOME_FEED;
+        this.setNextState(next);
         return {
           success: true,
           data: { closed: false, reason: 'nothing_to_close', url: curUrl },
-          nextState: next,
         };
       }
 
@@ -89,10 +89,10 @@ export class CloseVideoTask extends BaseTask {
       if (pages.length <= 1) {
         await page!.goto('https://www.bilibili.com', { waitUntil: 'domcontentloaded' });
         this.log('🏠 仅剩一个标签，直接导航回主页');
+        this.setNextState(MainState.HOME_FEED);
         return {
           success: true,
           data: { closed: false, returnedTo: page!.url() },
-          nextState: MainState.HOME_FEED,
         };
       }
 
@@ -109,10 +109,10 @@ export class CloseVideoTask extends BaseTask {
         await nonVideo.bringToFront().catch(() => {});
         context.page = nonVideo;
         this.log(`📑 回到非视频标签: ${nonVideo.url().slice(0, 60)}（剩余 ${remain.length} 个标签）`);
+        this.setNextState(MainState.HOME_FEED);
         return {
           success: true,
           data: { closed: true, returnedTo: nonVideo.url() },
-          nextState: MainState.HOME_FEED,
         };
       }
 
@@ -121,10 +121,10 @@ export class CloseVideoTask extends BaseTask {
       await newPage.goto('https://www.bilibili.com', { waitUntil: 'domcontentloaded' });
       context.page = newPage;
       this.log('🆕 无非视频标签，新开主页');
+      this.setNextState(MainState.HOME_FEED);
       return {
         success: true,
         data: { closed: true, returnedTo: newPage.url() },
-        nextState: MainState.HOME_FEED,
       };
     } catch (error) {
       return {

@@ -8,24 +8,24 @@
  * - **中断当前任务**：BrowseDynamic 是长停留任务，触发蹲饼时直接打断
  *
  * 集成点：
- * - TaskExecutor：任务开始/结束更新 `currentTaskName`（执行器本身不判断暂停，只负责接收并执行）
+ * - TaskExecutor：任务开始/结束更新 `currentTaskName`；持续性任务执行期间登记 `currentController`，结束后注销
  * - PersonaDrivenGenerator：next() 检查 `paused`（登录前暂停）+ `fetchCoordinator.paused`（蹲饼协调）→ 暂停时不生成新任务
- * - 行为层 awaitReadyIfSustained：持续式任务在暂停期间由任务自身等待（任务自身处理暂停）
- * - BrowseDynamicTask：停留循环检查 `interruptRequested`，被中断时提前结束
- * - passive-fetch：`runFetchSession` 按 `currentTaskName` 分派处理策略
+ * - 行为层 awaitReadyIfSustained：持续式任务在暂停期间由任务自身等待
+ * - 持续性任务（BrowseHome/BrowseProfile/BrowseDynamic/WatchVideo/Rest）：`execute()` 返回 TaskController，
+ *   通过 `controller.dwell()/aborted` 实现可中断、可暂停的分片等待；被 `abortCurrentTask()` 中断时先走 `onInterrupt()`
+ * - passive-fetch：`runFetchSession` 按 `currentTaskName` 分派处理策略，需要让位时 `abortCurrentTask()`
  */
+import type { TaskController } from '../action/task/base';
 export const fetchCoordinator = {
   /** 当前正在执行的任务名（executor 更新；'IDLE' 表示无任务执行中） */
   currentTaskName: 'IDLE' as string,
-  /** 暂停标志：为 true 时 executor 在任务边界等待，不生成/执行下一个任务（在监听 update 时设置，生成器不会再生成新任务） */
-  paused: false,
-  /** 中断当前任务请求（BrowseDynamic 停留循环检测到后提前结束） */
-  interruptRequested: false,
   /**
-   * 内核「停止模拟行为」请求（sim off）：与蹲饼的 interruptRequested **独立**（互不清除），
-   * 供持续式任务在分片检查点感知 → 结束当前任务并收尾，使整个模拟在最后一个任务结束后停止。
+   * 当前**持续性任务**的控制器（executor 在持续性任务执行期间登记）；无则为 null。
+   * 蹲饼让位 / 内核停止模拟均通过 `abortCurrentTask()` → `controller.abort()` 请求中断。
    */
-  stopRequested: false,
+  currentController: null as TaskController | null,
+  /** 暂停标志：为 true 时生成器不再生成新任务（蹲饼监听 update 时设置） */
+  paused: false,
   /**
    * 蹲饼开启期间置 true：任务生成侧据此把「长休息」权重置 0。
    * 长休息会关闭浏览器 / 长时间停止活动，会使蹲饼失效；由内核 startFetch()/stopFetch() 维护。
@@ -39,7 +39,7 @@ export const fetchCoordinator = {
     }
   },
 
-  /** 暂停任务流（监听 update 时设置：executor 完成当前任务后不会生成新任务） */
+  /** 暂停任务流（不再生成新任务） */
   pause(): void {
     fetchCoordinator.paused = true;
   },
@@ -49,24 +49,20 @@ export const fetchCoordinator = {
     fetchCoordinator.paused = false;
   },
 
-  /** 请求中断当前任务（BrowseDynamic 检测到后提前结束） */
-  requestInterrupt(): void {
-    fetchCoordinator.interruptRequested = true;
-  },
-
-  /** 清除中断请求 */
-  clearInterrupt(): void {
-    fetchCoordinator.interruptRequested = false;
-  },
-
-  /** 请求停止模拟行为（内核 sim off 调用；持续式任务在检查点感知后收尾结束当前任务） */
-  requestStop(): void {
-    fetchCoordinator.stopRequested = true;
-  },
-
-  /** 清除停止请求（内核在模拟彻底结束后调用，供下次 startSimulation 使用） */
-  clearStop(): void {
-    fetchCoordinator.stopRequested = false;
+  /**
+   * 请求中断当前**持续性任务**（蹲饼让位 / 内核停止模拟）。
+   * 本质：调用控制器 `abort()` → 任务的「中断处理」→ 结束异步进程。
+   * 一次性短任务不可中断（等待其自然结束）。
+   *
+   * @returns 是否命中了可中断的持续性任务
+   */
+  async abortCurrentTask(): Promise<boolean> {
+    const controller = fetchCoordinator.currentController;
+    if (!controller) {
+      return false;
+    }
+    await controller.abort();
+    return true;
   },
 
   /** 开关「禁止长休息」（内核在蹲饼开启期间置 true，关闭后恢复） */

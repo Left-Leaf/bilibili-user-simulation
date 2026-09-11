@@ -117,8 +117,12 @@ export class PersonaDrivenGenerator implements TaskGenerator {
     registerAllTasks();
   }
 
-  reset(): void {
+  reset(context?: TaskContext): void {
     this.currentState = sampleInitialState(this.persona);
+    // 从零打开：同步校正上下文状态，避免下一次上线沿用上次会话遗留的「前一个状态」
+    if (context) {
+      context.currentState = this.currentState;
+    }
     this.startedAt = this.nowFn();
     this.taskCount = 0;
     this.matrix = buildTransitionMatrix(this.persona);

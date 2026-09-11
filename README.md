@@ -216,6 +216,37 @@ id_str, type, visible, basic{}, modules{}, orig
 > 相关实现：`fetch-coordinator.ts`（`longRestDisabled`）、`task-registrations.ts`（Rest 注册表）、
 > `persona-generator.ts`（BROWSER_CLOSED 分支）、`rest.ts`（`ctx.state.currentRest` 标记）、`kernel.startFetch()`。
 
+## 任务的统一执行模型（开始 / 执行 / 结束 + 控制器）
+
+执行器对**每一个任务**固定按三段调用，状态流转是强制流程：
+
+```text
+preCheck(context)          前置检查（不通过则跳过）
+   ↓
+onStart(context)           ① 开始处理：载入「前一个状态」（context.currentState）
+   ↓
+execute(context)           ② 执行：只做事 / 产出数据，不生成状态
+   ├─ 一次性任务 → 返回 TaskResult
+   └─ 持续性任务 → 返回 TaskController（执行器 await controller.done）
+   ↓
+onEnd(context, outcome)    ③ 结束处理：生成「后一个状态」（TaskResult.nextState）
+```
+
+- **开始函数负责载入前一个状态**：`BaseTask.onStart()` 默认把 `context.currentState`
+  （上一任务 onEnd 生成并写入）载入到 `this.prevState`；子类覆盖时必须 `await super.onStart(context)`。
+- **结束函数负责生成后一个状态**：任务在 `execute()` 里用 `this.setNextState(...)`（或 `finishWith()`）
+  声明落点，`BaseTask.onEnd()` 默认把它合并进最终结果；执行器据此更新 `context.currentState`，
+  供下一个任务的开始函数载入。未声明则沿用前一个状态（状态机不变）。`onEnd` 即使 `execute` 抛错也会被调用。
+- **持续性任务**（`BrowseHome` / `BrowseProfile` / `BrowseDynamic` / `WatchVideo` / `Rest`）：
+  - `execute()` 立即返回 `TaskController`，任务主体在后台运行；`controller.done` **只表示任务是否结束**，不带结果；
+  - 结果存在任务状态里（`this.result`），由 ③ 结束函数读取；
+  - 主体用 `controller.dwell(ms)` / `controller.waitIfPaused()` 做可中断 / 可暂停的分片等待；
+  - **中止**（`controller.abort()` = 调用任务的 `onInterrupt()` → 等主体收尾 → 结束异步进程），
+    执行器等到 `done` 结束后才调用 `onEnd`；
+  - 谁来中止：被动蹲饼让位、内核 `sim off` 停止模拟（都经 `fetchCoordinator.abortCurrentTask()`）。
+- 中断语义：持续性任务被中断后若只是**让位**（如蹲饼插队），主体返回 `success: true + data.interrupted`
+  ⇒ 任务流继续；只有 `status: interrupted/terminated` 才会终止整条任务流。
+
 ## 人格配置字段说明（data/personas/*.json）
 
 人格 = 养号行为 + 蹲饼目标的「人设」。按 `{personaDir}/{personaId}.json` 查找（**personaId = 文件名**），

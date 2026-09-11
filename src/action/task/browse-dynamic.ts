@@ -1,4 +1,4 @@
-import { BaseTask, TaskResult } from './base';
+import { BaseTask, type TaskController, type TaskResult } from './base';
 import type { TaskContext } from '../execute/context';
 import { MainState } from '../engine/state';
 import { MouseMoveBehavior, LeftClickBehavior, ScrollBehavior, SleepBehavior } from '../behavior';
@@ -6,7 +6,6 @@ import { MousePositionManager } from '../engine/mouse-position-manager';
 import { HumanScroller } from '../engine/human-scroller';
 import { DwellTimeSampler } from '../engine/dwell-time';
 import { DEFAULT_BEHAVIOR_CONFIG } from '../engine/config';
-import { fetchCoordinator } from '../../business/fetch-coordinator';
 import { extractLoginUser, findDynamicEntryHandle } from '../../utils/bilibili-dom';
 
 /** 浏览动态页任务的输入：由人格（决策层）在执行时提供 */
@@ -54,7 +53,23 @@ export class BrowseDynamicTask extends BaseTask {
     }
   }
 
-  async execute(context: TaskContext): Promise<TaskResult> {
+  /**
+   * ② 执行：持续性任务 → 返回控制器。
+   * 异步进程只表示「是否结束」；数据结果与落点写入任务状态，由 ③ 结束函数（onEnd）读取并生成后一个状态。
+   */
+  async execute(context: TaskContext): Promise<TaskController> {
+    const ctrl = this.createController(context);
+    void this.run(context, ctrl);
+    return ctrl;
+  }
+
+  /** 中断处理（由 controller.abort() 调用） */
+  async onInterrupt(): Promise<void> {
+    this.log('⚡ 收到中断（蹲饼让位 / 停止模拟），结束浏览动态页');
+  }
+
+  /** 任务主体：只「做事 + 记录数据 + 声明落点」，不生成状态 */
+  private async run(context: TaskContext, ctrl: TaskController): Promise<void> {
     const page = context.page!;
     const browser = context.browser;
     const steps: TaskResult[] = [];
@@ -127,13 +142,12 @@ export class BrowseDynamicTask extends BaseTask {
       // 进入后初看：用总停留的一部分（真人先看一眼再开始刷），不超过 ~4.5s
       const initialLookMs = Math.min(totalDwellMs * 0.35, 4500);
       this.log(`👀 先停留浏览 ${(initialLookMs / 1000).toFixed(1)}s…`);
-      if (!(await this.interruptibleDwell(context, initialLookMs))) {
-        this.log('⚡ 收到让位信号（蹲饼中断 / 停止请求），中断浏览动态页');
-        return {
-          success: true,
-          data: { url: context.page!.url(), interrupted: true, steps: steps.length },
-          nextState: MainState.DYNAMIC_FEED,
-        };
+      if (!(await ctrl.dwell(initialLookMs))) {
+        this.finishWith(
+          { success: true, data: { url: context.page!.url(), interrupted: true, steps: steps.length } },
+          MainState.DYNAMIC_FEED
+        );
+        return;
       }
 
       // 行为4：拟人滚动浏览动态流，剩余停留时长分摊到每屏（总时长 = 进入时确定的值）
@@ -143,13 +157,12 @@ export class BrowseDynamicTask extends BaseTask {
       for (let i = 0; i < depth; i++) {
         await new ScrollBehavior(mousePos, distance).execute(context);
         this.log(`👀 停留浏览 ${(perScreenMs / 1000).toFixed(1)}s…`);
-        if (!(await this.interruptibleDwell(context, perScreenMs))) {
-          this.log('⚡ 收到让位信号（蹲饼中断 / 停止请求），中断浏览动态页');
-          return {
-            success: true,
-            data: { url: context.page!.url(), interrupted: true, browseDepth: depth, steps: steps.length },
-            nextState: MainState.DYNAMIC_FEED,
-          };
+        if (!(await ctrl.dwell(perScreenMs))) {
+          this.finishWith(
+            { success: true, data: { url: context.page!.url(), interrupted: true, browseDepth: depth, steps: steps.length } },
+            MainState.DYNAMIC_FEED
+          );
+          return;
         }
         if (i < depth - 1) {
           await new SleepBehavior(800 + Math.random() * 1000).execute(context);
@@ -164,40 +177,25 @@ export class BrowseDynamicTask extends BaseTask {
       // 拟人回滚到顶部（真人逛完动态会自然滚回顶部/初始位置）
       await new HumanScroller().scrollBackToTop(context.page!).catch(() => {});
 
-      return {
-        success: true,
-        data: {
-          url: context.page!.url(),
-          browseDepth: depth,
-          steps: steps.length,
-          enteredViaEntry,
-          reusedTab,
+      // 执行阶段结束：记录数据 + 声明落点（后一个状态由 onEnd 生成）
+      this.finishWith(
+        {
+          success: true,
+          data: {
+            url: context.page!.url(),
+            browseDepth: depth,
+            steps: steps.length,
+            enteredViaEntry,
+            reusedTab,
+          },
         },
-        nextState: MainState.DYNAMIC_FEED,
-      };
+        MainState.DYNAMIC_FEED
+      );
     } catch (error) {
-      return {
-        success: false,
-        error: `浏览动态页失败: ${(error as Error).message}`,
-        data: { steps: steps.length },
-      };
+      this.finishWith({ success: false, error: `浏览动态页失败: ${(error as Error).message}`, data: { steps: steps.length } });
+    } finally {
+      ctrl.finish(); // 任务主体结束 → 结束异步进程（执行器随后调用 ③ 结束处理）
     }
-  }
-
-  /** 可中断停留：分片等待并检查让位信号（蹲饼中断 / 内核停止请求）；被中断返回 false（提前结束收尾） */
-  private async interruptibleDwell(context: TaskContext, ms: number): Promise<boolean> {
-    const CHUNK = 400;
-    const shouldYield = (): boolean => fetchCoordinator.interruptRequested || fetchCoordinator.stopRequested;
-    let remain = ms;
-    while (remain > 0) {
-      if (shouldYield()) {
-        return false;
-      }
-      const step = Math.min(CHUNK, remain);
-      await this.sleepReal(step);
-      remain -= step;
-    }
-    return !shouldYield();
   }
 
   /** 在所有标签页中查找动态页（t.bilibili.com，动态入口 target=_blank 打开新标签页） */

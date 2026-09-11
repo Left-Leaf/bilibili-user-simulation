@@ -9,7 +9,7 @@ export class DeterministicGenerator implements TaskGenerator {
     this.tasks = tasks;
   }
 
-  reset(): void {
+  reset(_context?: TaskContext): void {
     // 确定性生成器不需要重置逻辑
   }
 

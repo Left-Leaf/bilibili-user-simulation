@@ -85,6 +85,7 @@ export class SearchTask extends BaseTask {
             context.page = searchTab;
           }
           this.log(`🔍 复用已有搜索标签页: ${searchTab.url().slice(0, 80)}`);
+          this.setNextState(MainState.SEARCH_RESULT);
           return {
             success: true,
             data: {
@@ -96,7 +97,6 @@ export class SearchTask extends BaseTask {
               viaPopup: false,
               reused: true,
             },
-            nextState: MainState.SEARCH_RESULT,
           };
         }
         // 目标与搜索页不一致 → 在该搜索页搜索栏重新输入搜索（当前页直接刷新，不新开标签）
@@ -107,6 +107,7 @@ export class SearchTask extends BaseTask {
         this.log(`🔍 在已有搜索标签页重新输入搜索: ${this.input.keyword}`);
         const reres = await this.performSearch(context, this.input.keyword);
         this.log(`🔍 重新搜索：${this.input.keyword}（触发：${reres.trigger}）`);
+        this.setNextState(MainState.SEARCH_RESULT);
         return {
           success: true,
           data: {
@@ -118,13 +119,13 @@ export class SearchTask extends BaseTask {
             viaPopup: reres.viaPopup,
             reused: true,
           },
-          nextState: MainState.SEARCH_RESULT,
         };
       }
 
       // 无已有搜索页 → 正常搜索流程（performSearch 内部：非搜索页搜索 → window.open 新标签）
       const res = await this.performSearch(context, this.input.keyword);
       this.log(`🔍 搜索：${this.input.keyword}（触发：${res.trigger}）`);
+      this.setNextState(MainState.SEARCH_RESULT);
       return {
         success: true,
         data: {
@@ -135,7 +136,6 @@ export class SearchTask extends BaseTask {
           url: res.url,
           viaPopup: res.viaPopup,
         },
-        nextState: MainState.SEARCH_RESULT,
       };
     } catch (error) {
       return {

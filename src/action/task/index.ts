@@ -1,5 +1,6 @@
-export { BaseTask } from './base';
-export type { Task, TaskResult } from './base';
+export { BaseTask, isTaskController, createSustainedController } from './base';
+export type { Task, TaskController, TaskExecution, TaskResult } from './base';
+export { TaskStatus } from './base';
 
 // 搜索决策器（决定搜索触发方式）
 export { SearchDecider, DirectSearchDecider, FirstSuggestionDecider } from './search-decider';

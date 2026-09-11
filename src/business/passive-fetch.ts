@@ -793,28 +793,24 @@ async function runFetchSession(page: Page, updateNum: number): Promise<void> {
   }
   try {
     if (task === 'BrowseDynamic') {
-      // 持续式 + 冲突最大（都在动态页）：直接中断结束当前任务 → 回滚顶部 → 点击 → 等补全 → 刷新兜底
-      fetchCoordinator.requestInterrupt();
-      try {
-        await sleep(600); // 给 BrowseDynamic 停留循环响应中断
-        await withTimeout(
-          page.evaluate(() => window.scrollTo(0, 0)),
-          3000
-        ).catch(() => {});
-        await clickNotifyButton(page); // 动态页已在前台，直接点击
-        // 等点击触发的 feed/all 响应处理 + 滚动补全完成（syncState 回 idle）后再恢复任务流
-        const afterClick = Date.now();
-        await waitCatchUpDone(afterClick);
-        // 点击后未取到增量 → 刷新动态页兜底（动态页仍在前台，录屏覆盖刷新画面）
-        await retryByRefresh(page);
-        await sleep(1500); // 等刷新后的初始 feed/all 响应处理（取到则 deliver，未取到提示「刷新后未发现」）
-        // 刷新后仍未取到 → 等 1 分钟再次刷新（任务流保持阻塞），处理收录延迟
-        await retryRefreshAfterMinute(page);
-        // 停录：动态页仍在前台，已覆盖点击+刷新（含二次刷新）全流程
-        await finishRecording(rec);
-      } finally {
-        fetchCoordinator.clearInterrupt();
-      }
+      // 持续式 + 冲突最大（都在动态页）：直接中止当前任务（走控制器中断）→ 回滚顶部 → 点击 → 等补全 → 刷新兜底
+      await fetchCoordinator.abortCurrentTask();
+      await sleep(600); // 给 BrowseDynamic 主体响应中断并收尾
+      await withTimeout(
+        page.evaluate(() => window.scrollTo(0, 0)),
+        3000
+      ).catch(() => {});
+      await clickNotifyButton(page); // 动态页已在前台，直接点击
+      // 等点击触发的 feed/all 响应处理 + 滚动补全完成（syncState 回 idle）后再恢复任务流
+      const afterClick = Date.now();
+      await waitCatchUpDone(afterClick);
+      // 点击后未取到增量 → 刷新动态页兜底（动态页仍在前台，录屏覆盖刷新画面）
+      await retryByRefresh(page);
+      await sleep(1500); // 等刷新后的初始 feed/all 响应处理（取到则 deliver，未取到提示「刷新后未发现」）
+      // 刷新后仍未取到 → 等 1 分钟再次刷新（任务流保持阻塞），处理收录延迟
+      await retryRefreshAfterMinute(page);
+      // 停录：动态页仍在前台，已覆盖点击+刷新（含二次刷新）全流程
+      await finishRecording(rec);
       logDyn('✅ 被动蹲饼（BrowseDynamic 场景）完成，恢复任务流');
     } else if (SUSTAINED_TASKS.has(task)) {
       // 持续式（浏览主页/UP 主页/观看视频/短休息）：暂停任务流（入口已暂停）→ 切动态页前台 → 点击 → 等 feed/all → 刷新兜底
@@ -850,7 +846,6 @@ async function runFetchSession(page: Page, updateNum: number): Promise<void> {
       }
     }
   } finally {
-    fetchCoordinator.clearInterrupt();
     fetchCoordinator.resume(); // 恢复任务流（生成器可继续生成下一个任务）
     sessionActive = false;
     sessionDelivered = false; // 本次获取流程结束，重置「已取到」标记

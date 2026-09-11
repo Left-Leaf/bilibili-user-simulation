@@ -1,4 +1,4 @@
-import { BaseTask, TaskResult } from './base';
+import { BaseTask, type TaskController, type TaskResult } from './base';
 import type { TaskContext } from '../execute/context';
 import { MainState } from '../engine/state';
 import { ScrollBehavior, SleepBehavior, LeftClickBehavior } from '../behavior';
@@ -6,7 +6,6 @@ import { MousePositionManager } from '../engine/mouse-position-manager';
 import { HumanScroller } from '../engine/human-scroller';
 import { DwellTimeSampler } from '../engine/dwell-time';
 import { DEFAULT_BEHAVIOR_CONFIG } from '../engine/config';
-import { interruptibleDwell } from '../../utils/interruptible-dwell';
 import { extractLoginUser, collectVideoEntries } from '../../utils/bilibili-dom';
 
 /** 一次刷新最多收集多少个视频（DOM 收集，不耗请求） */
@@ -91,7 +90,23 @@ export class BrowseHomeTask extends BaseTask {
     }
   }
 
-  async execute(context: TaskContext): Promise<TaskResult> {
+  /**
+   * ② 执行：持续性任务 → 返回控制器。
+   * 异步进程只表示「是否结束」；数据结果与落点写入任务状态，由 ③ 结束函数（onEnd）读取并生成后一个状态。
+   */
+  async execute(context: TaskContext): Promise<TaskController> {
+    const ctrl = this.createController(context);
+    void this.run(context, ctrl); // 任务主体后台执行
+    return ctrl;
+  }
+
+  /** 中断处理（由 controller.abort() 调用）：主体通过 `ctrl.dwell()===false` 感知并提前收尾 */
+  async onInterrupt(): Promise<void> {
+    this.log('⚡ 收到中断（蹲饼让位 / 停止模拟），结束浏览主页');
+  }
+
+  /** 任务主体：只「做事 + 记录数据 + 声明落点」，不生成状态 */
+  private async run(context: TaskContext, ctrl: TaskController): Promise<void> {
     const page = context.page!;
     try {
       // 刷新 = 点击主页「换一换」按钮重新拉取推荐流（而非整页刷新）
@@ -103,9 +118,9 @@ export class BrowseHomeTask extends BaseTask {
       this.log(`👀 进入主页，先停留浏览 ${(2 + Math.random() * 3).toFixed(1)}s…`);
       const initialDwell =
         new DwellTimeSampler(DEFAULT_BEHAVIOR_CONFIG.behavior.dwellTime).sample('home_feed') + 1500 + Math.random() * 1500;
-      if (!(await interruptibleDwell(initialDwell))) {
-        this.log('⚡ 收到让位信号（蹲饼中断 / 停止请求），中断浏览主页');
-        return { success: true, data: { interrupted: true }, nextState: MainState.HOME_FEED };
+      if (!(await ctrl.dwell(initialDwell))) {
+        this.finishWith({ success: true, data: { interrupted: true } }, MainState.HOME_FEED);
+        return;
       }
 
       // 拟人滚动浏览推荐流（滚动参数：左边缘安全鼠标位 + 一屏距离，由管理器计算）
@@ -113,13 +128,9 @@ export class BrowseHomeTask extends BaseTask {
       for (let i = 0; i < depth; i++) {
         await new ScrollBehavior(mousePos, distance).execute(context);
         const screenDwell = new DwellTimeSampler(DEFAULT_BEHAVIOR_CONFIG.behavior.dwellTime).sample('home_feed');
-        if (!(await interruptibleDwell(screenDwell))) {
-          this.log('⚡ 收到让位信号（蹲饼中断 / 停止请求），中断浏览主页');
-          return {
-            success: true,
-            data: { interrupted: true, browseDepth: depth },
-            nextState: MainState.HOME_FEED,
-          };
+        if (!(await ctrl.dwell(screenDwell))) {
+          this.finishWith({ success: true, data: { interrupted: true, browseDepth: depth } }, MainState.HOME_FEED);
+          return;
         }
         if (i < depth - 1) {
           await new SleepBehavior(800 + Math.random() * 1000).execute(context);
@@ -137,16 +148,12 @@ export class BrowseHomeTask extends BaseTask {
       // 拟人回滚到顶部（真人刷完首页会自然滚回顶部/初始位置）
       await new HumanScroller().scrollBackToTop(page).catch(() => {});
 
-      return {
-        success: true,
-        data: { videos, count: videos.length },
-        nextState: MainState.HOME_FEED,
-      };
+      // 执行阶段结束：记录数据 + 声明落点（后一个状态由 onEnd 生成）
+      this.finishWith({ success: true, data: { videos, count: videos.length } }, MainState.HOME_FEED);
     } catch (error) {
-      return {
-        success: false,
-        error: `Browse home failed: ${(error as Error).message}`,
-      };
+      this.finishWith({ success: false, error: `Browse home failed: ${(error as Error).message}` });
+    } finally {
+      ctrl.finish(); // 任务主体结束 → 结束异步进程（执行器随后调用 ③ 结束处理）
     }
   }
 

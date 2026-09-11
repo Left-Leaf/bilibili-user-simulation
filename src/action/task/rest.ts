@@ -1,8 +1,7 @@
-import { BaseTask, TaskResult } from './base';
+import { BaseTask, type TaskController, type TaskResult } from './base';
 import type { TaskContext } from '../execute/context';
 import { MainState } from '../engine/state';
-import { SleepBehavior, CloseBrowserBehavior } from '../behavior';
-import { fetchCoordinator } from '../../business/fetch-coordinator';
+import { CloseBrowserBehavior } from '../behavior';
 
 /** 休息/暂停任务的输入：由人格（决策层）在执行时提供 */
 export interface RestTaskInput {
@@ -45,7 +44,23 @@ export class RestTask extends BaseTask {
     return !!(context.browser && context.page);
   }
 
-  async execute(context: TaskContext): Promise<TaskResult> {
+  /**
+   * ② 执行：持续性任务 → 返回控制器。
+   * 异步进程只表示「是否结束」；数据结果与落点写入任务状态，由 ③ 结束函数（onEnd）读取并生成后一个状态。
+   */
+  async execute(context: TaskContext): Promise<TaskController> {
+    const ctrl = this.createController(context);
+    void this.run(context, ctrl);
+    return ctrl;
+  }
+
+  /** 中断处理（由 controller.abort() 调用）：休息任务在此收尾（强制上线 / 停止模拟） */
+  async onInterrupt(): Promise<void> {
+    this.log('⚡ 收到中断（强制上线 / 停止模拟），结束休息并收尾');
+  }
+
+  /** 任务主体：只「做事 + 记录数据 + 声明落点」，不生成状态 */
+  private async run(context: TaskContext, ctrl: TaskController): Promise<void> {
     const { durationMs } = this.input;
     const threshold = this.input.closeBrowserAfterMs ?? 10 * 60 * 1000; // 默认 10 分钟
     // 任务一开始就根据休息时长决定：长休息 = 关闭浏览器下线；短休息 = 停止活动（浏览器保持打开）
@@ -67,11 +82,11 @@ export class RestTask extends BaseTask {
         if (!cb.success) {
           throw new Error(cb.error);
         }
-        return {
-          success: true,
-          data: { durationMs, closedBrowser: true, longRest: true, threshold },
-          nextState: MainState.BROWSER_CLOSED,
-        };
+        this.finishWith(
+          { success: true, data: { durationMs, closedBrowser: true, longRest: true, threshold } },
+          MainState.BROWSER_CLOSED
+        );
+        return;
       }
 
       // ===== 短休息：停止活动（浏览器保持打开、上线继续），期间可被「强制上线」指令中断 =====
@@ -83,31 +98,27 @@ export class RestTask extends BaseTask {
       let elapsed = 0;
       let nextPrintAt = 60 * 1000;
       while (elapsed < durationMs) {
-        // 停止请求（内核 sim off）：持续式休息任务在此检查点收尾结束，让整个模拟尽快停止
-        if (fetchCoordinator.stopRequested) {
-          this.log('⏹️ 收到停止请求，结束休息并收尾');
-          return {
-            success: false,
-            interrupted: true,
-            reason: 'stop-requested',
-            data: { durationMs, interrupted: true, closedBrowser: false, elapsed },
-          };
+        // 中断（内核 sim off 停止请求 / 开启蹲饼前中断长休息）：在此检查点收尾结束
+        if (ctrl.aborted) {
+          this.finishWith({ success: true, data: { durationMs, interrupted: true, closedBrowser: false, elapsed } });
+          return;
         }
         // 强制上线：立即结束短休息、不关浏览器、继续上线
         if (context.state.get('forceOnline') === true) {
           context.state.set('forceOnline', false);
           this.log(`🚀 收到强制上线指令，提前结束休息（已休息 ${(elapsed / 1000).toFixed(0)}s），立即上线`);
-          return {
-            success: true,
-            data: { durationMs, interrupted: true, closedBrowser: false, elapsed },
+          this.finishWith(
+            { success: true, data: { durationMs, interrupted: true, closedBrowser: false, elapsed } },
             // 回首页继续：否则生成器内部状态会滞留在 BROWSER_CLOSED，导致任务流被判定「已下线」而结束
-            nextState: MainState.HOME_FEED,
-          };
+            MainState.HOME_FEED
+          );
+          return;
         }
         const step = Math.min(FORCE_ONLINE_CHECK_MS, durationMs - elapsed);
-        const sl = await new SleepBehavior(step).execute(context);
-        if (!sl.success) {
-          throw new Error(sl.error);
+        // 分片等待：可被中断 / 可暂停
+        if (!(await ctrl.dwell(step))) {
+          this.finishWith({ success: true, data: { durationMs, interrupted: true, closedBrowser: false, elapsed } });
+          return;
         }
         elapsed += step;
         // 到达打印间隔才打印倒计时
@@ -119,18 +130,13 @@ export class RestTask extends BaseTask {
           nextPrintAt += 60 * 1000;
         }
       }
-      return {
-        success: true,
-        data: { durationMs, closedBrowser: false, longRest: false, threshold },
-      };
+      // 执行阶段结束：记录数据（后一个状态沿用前一个）
+      this.finishWith({ success: true, data: { durationMs, closedBrowser: false, longRest: false, threshold } });
     } catch (error) {
-      return {
-        success: false,
-        error: `休息任务失败: ${(error as Error).message}`,
-        data: { durationMs },
-      };
+      this.finishWith({ success: false, error: `休息任务失败: ${(error as Error).message}`, data: { durationMs } });
     } finally {
       context.state.delete('currentRest'); // 休息结束：清除标记
+      ctrl.finish(); // 任务主体结束 → 结束异步进程（执行器随后调用 ③ 结束处理）
     }
   }
 }

@@ -638,8 +638,7 @@ export class SimulationKernel {
     ctx.terminationReason = undefined;
     this.control.stopped = false;
     this.control.reloadRequested = false;
-    fetchCoordinator.clearStop();
-    this.generator!.reset();
+    this.generator!.reset(ctx);
     this.generator!.setPaused(false);
     fetchCoordinator.resume();
 
@@ -673,9 +672,9 @@ export class SimulationKernel {
 
     // ① 阻塞生成器：不再生成下一个任务（执行器无需任何中断处理）
     this.control.stopped = true;
-    // ② 持续式任务：请求收尾（浏览类分片停留、观看 / 休息循环均会感知）
-    fetchCoordinator.requestStop();
-    // 若此刻正被蹲饼暂停，先解开等待，保证能观察到停止标志
+    // ② 持续式任务：通过控制器中止（abort → 任务中断处理 → 结束异步进程；浏览/观看/休息均在分片检查点收尾）
+    await fetchCoordinator.abortCurrentTask();
+    // 若此刻正被蹲饼暂停，先解开等待，保证任务能观察到中断并收尾
     fetchCoordinator.resume();
 
     this.stopSimulationTask = (async () => {
@@ -684,7 +683,6 @@ export class SimulationKernel {
       this.simulationTask = null;
       this.simulationRunning = false;
       this.control.stopped = false; // 复原，便于下次 startSimulation()
-      fetchCoordinator.clearStop();
       // ④ 关闭不再需要的页面
       await this.closeIdlePages().catch(() => {});
       this.log('🛑 模拟行为已彻底结束（浏览器保持打开：可继续蹲饼，或从零重开模拟）');

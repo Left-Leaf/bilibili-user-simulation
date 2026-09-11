@@ -59,7 +59,8 @@ export class LikeTask extends BaseTask {
       }
 
       this.log(`👍 已点赞: ${bvFromUrl(page.url()) || '无BV'}「${(await page.title().catch(() => '')).slice(0, 20)}」`);
-      return { success: true, data: { steps: steps.length }, nextState: MainState.CONTENT_CONSUMING };
+      this.setNextState(MainState.CONTENT_CONSUMING);
+      return { success: true, data: { steps: steps.length } };
     } catch (error) {
       return { success: false, error: `点赞失败: ${(error as Error).message}`, data: { steps: steps.length } };
     }
