@@ -20,3 +20,7 @@ export type {
   KernelCommandHandler,
   KernelCommandResult,
 } from './commands.js';
+
+// 人格目录工具（personaId = 文件名）
+export { listPersonas, loadPersona, loadPersonaFromFile, DEFAULT_PERSONA_DIR } from '../persona/loader.js';
+export type { PersonaEntry } from '../persona/loader.js';

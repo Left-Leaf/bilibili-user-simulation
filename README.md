@@ -34,6 +34,8 @@ npm run typecheck
 import { kernel } from 'bilibili-user-simulation'; // 全局静态单例（SimulationKernel.getInstance() 同义）
 
 await kernel.initialize({ headless: true, personaId: 'ak-night-worker' }); // ① 打开浏览器并登录（幂等；登录态有效免扫码）
+// 主项目接入：指向自己的人格目录，personaId 就是该目录下的文件名
+// await kernel.initialize({ headless: true, personaDir: '/host/data/personas', personaId: 'my-persona' });
 await kernel.startFetch();        // ② 打开蹲饼（可独立开关）
 await kernel.startSimulation();   // ② 打开模拟行为（可独立开关）
 ...
@@ -44,13 +46,31 @@ await kernel.shutdown();          // 全部关闭 + 退出浏览器
 
 | 方法 | 作用 |
 | --- | --- |
-| `initialize(options)` | 打开浏览器并确保登录；**不启动任何功能**（人格三选一：`personaId` / `personaFile` / `persona`） |
+| `initialize(options)` | 打开浏览器并确保登录；**不启动任何功能**（人格：`personaDir` + `personaId`，或 `personaFile` / `persona`） |
 | `startSimulation()` / `stopSimulation()` | 打开 / **彻底结束**模拟行为（任务流） |
 | `startFetch()` / `stopFetch([closePage])` | 打开 / 关闭蹲饼（动态流捕获） |
 | `login()` | 确保登录（未登录则扫码） |
 | `shutdown()` | 停止全部 + 关闭浏览器 |
 | `getStatus()` / `getDynamics(n)` | 状态快照 / 已捕获动态 |
+| `listPersonas()` / `personaDir` | 当前人格目录下全部可用人格（`personaId` = 文件名）/ 当前人格目录 |
 | `executeCommand(line)` / `attachConsole(opts)` | 指令控制（见下「内核指令」） |
+
+**人格目录（personaId = 文件名）**：`personaDir` 指向人格目录（默认包内 `data/personas`），
+`personaId` 即该目录下的**文件名**（不含 `.json`）—— 按 `{personaDir}/{personaId}.json` 查找。
+主项目作为依赖库导入时，指向自己的目录即可，**换人格只改 personaId**：
+
+```ts
+import { listPersonas, kernel } from 'bilibili-user-simulation';
+
+const personaDir = '/host/data/personas';
+console.log(listPersonas(personaDir).map((p) => p.id));   // ['ak-night-worker', 'my-persona', ...]
+await kernel.initialize({ personaDir, personaId: 'my-persona' }); // 加载 personaDir/my-persona.json
+```
+
+- **文件名即 personaId**：JSON 里的 `id` 字段若与文件名不一致，以**文件名**为准（唯一且可预测）；
+- 人格文件只需写想改的字段（与包内默认值深层合并）；
+- 找不到时抛错并列出该目录下**可用的人格 id**；
+- 也可用 `personaFile`（任意路径的单个人格文件）或 `persona`（直接传对象，优先级最高）。
 
 **`stopSimulation()` 的停止流程**（不中断执行器，只阻塞生成器）：
 
@@ -68,12 +88,15 @@ import { runPersonaEngine } from 'bilibili-user-simulation'; // 库入口 = src/
 
 await runPersonaEngine({
   headless: true,
-  personaFile: '/path/to/my-persona.json', // ① 指明人格配置文件（也可传 persona 对象）
+  personaDir: '/host/data/personas', // ① 人格目录（personaId = 该目录下的文件名）
+  personaId: 'my-persona',
   onDynamics: (dynamics, kind) => {         // ② 注册动态监听，接收模块内部捕获的动态
     // kind: 'INIT'（初始加载） | 'UPDATE'（轮询更新）
   },
 });
 ```
+
+- 也可用 `personaFile: '/path/to/my-persona.json'`（单个文件任意路径）或 `persona: {...}`（直接传对象）。
 
 - 注册 `onDynamics` 后即为**模块模式**：捕获的动态交给主项目回调，不再读 `config-app.json5`
   自动外发/写本地文档（出口由主项目决定）。
@@ -116,14 +139,15 @@ await runPersonaEngine({
 
 ## 人格配置字段说明（data/personas/*.json）
 
-人格 = 养号行为 + 蹲饼目标的「人设」。加载时会与 `src/persona/defaults.ts` 的默认值**深层合并**，
-缺省字段自动兜底——只需写想改的字段。示例：`data/personas/ak-night-worker.json`。
+人格 = 养号行为 + 蹲饼目标的「人设」。按 `{personaDir}/{personaId}.json` 查找（**personaId = 文件名**），
+加载时会与 `src/persona/defaults.ts` 的默认值**深层合并**，缺省字段自动兜底——只需写想改的字段。
+示例：`data/personas/ak-night-worker.json`（包内）；主项目可放自己的 `data/personas/` 并用 `personaDir` 指向。
 
 ### 顶层
 
 | 字段 | 类型 | 说明 |
 | --- | --- | --- |
-| `id` | string | 人格 id（引擎参数/指令里用；缺省用文件名） |
+| `id` | string | 人格 id（展示/兼容用）；**实际以文件名为准**（`personaId` = 文件名，二者不一致时以文件名为准） |
 | `meta` | object | `name`/`description`/`age`/`occupation`/`gender`(`male\|female`)/`bio`，展示用 |
 | `state_transition_bias` | object | **状态转移偏置**（人格差异根源）：`from状态 → { to状态: 乘性系数 }`，稀疏、缺省 1.0=常人；调制 BASE_MATRIX 后归一化，马尔科夫游走据此涌现行为序列 |
 | `initial_state_dist` | object | 上线起点分布：`状态名 → 概率`（替代「目的→入口」） |

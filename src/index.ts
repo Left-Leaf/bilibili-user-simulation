@@ -24,8 +24,9 @@ export type { PersonaRunOptions } from '../run/persona-engine.js';
 export { setDynamicListener } from './business/passive-fetch.js';
 export type { DynamicListener, FetchedDynamic } from './business/passive-fetch.js';
 
-// 人格加载（模块接入方可用 loadPersonaFromFile 加载自己的配置文件）
-export { loadPersona, loadPersonaFromFile } from './persona/loader.js';
+// 人格加载（`personaId` = 人格目录下的**文件名**；主项目可用 personaDir 指向自己的 data/personas）
+export { loadPersona, loadPersonaFromFile, listPersonas, DEFAULT_PERSONA_DIR } from './persona/loader.js';
+export type { PersonaEntry } from './persona/loader.js';
 export type { PersonaConfig } from './persona/types.js';
 
 // ===== 内核（推荐用法）：全局静态单一实例，统一管理浏览器会话 + 独立开关两大功能 =====

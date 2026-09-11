@@ -9,8 +9,9 @@
  *   ④ kernel.shutdown()              全部关闭 + 退出浏览器
  *
  * 用法（cwd = 本包根）：
- *   npm run start:kernel                 # 默认人格 ak-night-worker
- *   npm run start:kernel -- <人格id>      # 指定包内人格
+ *   npm run start:kernel                          # 默认人格（包内 data/personas/ak-night-worker.json）
+ *   npm run start:kernel -- <personaId>            # 指定人格（personaId = 人格目录下的文件名）
+ *   npm run start:kernel -- <personaId> <目录>      # 指定人格目录（如主项目自己的 data/personas）
  *
  * 功能开关全部由**内核指令**驱动（终端输入，回车执行；也可由宿主代码 / IPC 下发）：
  *   sim on | sim off                                   模拟行为：从零打开 / 彻底结束
@@ -28,11 +29,15 @@
  *   await kernel.executeCommand(...)    任意通道下发指令（IPC / HTTP / 宿主代码）
  *   kernel.registerCommand(...)         扩展自定义指令
  */
+import path from 'node:path';
 import { SimulationKernel } from '../src/kernel/kernel.js';
 import { loadFetchReportConfig } from './fetch-report-config.js';
 import { loadFetchRecordingConfig } from './fetch-recording-config.js';
 
+/** personaId = 人格目录下的文件名（不含 .json） */
 const personaId = process.argv[2] ?? 'ak-night-worker';
+/** 人格目录（主项目自己的 data/personas；省略则用包内 data/personas） */
+const personaDir = process.argv[3] ? path.resolve(process.argv[3]) : undefined;
 const kernel = SimulationKernel.getInstance();
 
 const fmtTime = (): string => new Date().toLocaleTimeString('zh-CN', { hour12: false });
@@ -41,19 +46,25 @@ const fmtTime = (): string => new Date().toLocaleTimeString('zh-CN', { hour12: f
 const reportConfig = loadFetchReportConfig();
 loadFetchRecordingConfig();
 
-console.log(`\n🧠 内核演示启动 | 人格: ${personaId} | ${new Date().toLocaleString('zh-CN', { hour12: false })}`);
+console.log(`\n🧠 内核演示启动 | ${new Date().toLocaleString('zh-CN', { hour12: false })}`);
+console.log(`   人格目录: ${personaDir ?? '(包内 data/personas)'} | personaId: ${personaId}`);
 console.log('   流程: initialize() → startFetch() → startSimulation()\n');
 
 // ① 初始化：打开浏览器并登录（不启动任何功能）
 await kernel.initialize({
   headless: true,
   personaId,
+  personaDir, // 主项目自己的人格目录（personaId = 该目录下的文件名）
   fetchReport: reportConfig,
   onDynamics: (dynamics, kind) => {
     // 也可不传 onDynamics：动态会走 fetchReport 配置的出口（外发接口 / 本地文档）
     console.log(`[${fmtTime()}] [内核演示] 捕获动态 ${dynamics.length} 条（${kind}）`);
   },
 });
+
+// 可选：列出该人格目录下所有可用人格（文件名即 personaId）
+const available = kernel.listPersonas();
+console.log(`[内核演示] 可用人格（${kernel.personaDir}）: ${available.map((p) => p.id).join(', ') || '(无)'}`);
 
 // ② 打开蹲饼（独立）
 await kernel.startFetch();

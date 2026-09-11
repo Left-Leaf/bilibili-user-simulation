@@ -178,7 +178,12 @@ export interface PersonaRunOptions {
   mouseTrail?: boolean;
   /** 详细输出每个任务动作（有头观察用） */
   verbose?: boolean;
-  /** 人格来源①：包内 data/personas/{personaId}.json（默认 ak-night-worker） */
+  /**
+   * 人格目录：按 `{personaDir}/{personaId}.json` 查找（**personaId 即文件名**）。
+   * 默认包内 `data/personas`；主项目接入时指向自己的目录（如 `<主项目>/data/personas`）。
+   */
+  personaDir?: string;
+  /** 人格来源①：`personaDir` 下的 `{personaId}.json`（默认 ak-night-worker） */
   personaId?: string;
   /** 人格来源②：外部人格配置文件绝对路径（主项目以模块方式接入时指明） */
   personaFile?: string;
@@ -189,7 +194,7 @@ export interface PersonaRunOptions {
   onDynamics?: DynamicListener;
 }
 
-/** 按选项解析人格：对象 > 文件 > 包内 id */
+/** 按选项解析人格：对象 > 文件 > personaDir 下的 personaId（文件名即 id） */
 function resolvePersona(opts: PersonaRunOptions): PersonaConfig {
   if (opts.persona) {
     return opts.persona;
@@ -197,7 +202,7 @@ function resolvePersona(opts: PersonaRunOptions): PersonaConfig {
   if (opts.personaFile) {
     return loadPersonaFromFile(opts.personaFile);
   }
-  return loadPersona(opts.personaId ?? 'ak-night-worker');
+  return loadPersona(opts.personaId ?? 'ak-night-worker', opts.personaDir);
 }
 
 export async function runPersonaEngine(opts: PersonaRunOptions): Promise<void> {

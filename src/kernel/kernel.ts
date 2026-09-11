@@ -35,13 +35,14 @@
  * - `stopFetch()` 默认只停止「解析/投递/触发」，页面与增量基线保留，重新开启不会重复投递历史动态；
  * - 进程内只有一份蹲饼状态（passive-fetch 模块级单例）与一份浏览器会话，天然与内核单例对应。
  */
+import path from 'node:path';
 import readline from 'node:readline';
 import { createContext, type TaskContext } from '../action/execute/context.js';
 import { OpenBrowserBehavior, NavigateBehavior } from '../action/behavior/navigation.js';
 import { LoginTask } from '../action/task/login.js';
 import { TaskExecutor } from '../action/execute/executor.js';
 import { PersonaDrivenGenerator, type GeneratorControl } from '../action/generate/persona-generator.js';
-import { loadPersona, loadPersonaFromFile } from '../persona/loader.js';
+import { DEFAULT_PERSONA_DIR, listPersonas as scanPersonaDir, loadPersona, loadPersonaFromFile, type PersonaEntry } from '../persona/loader.js';
 import type { PersonaConfig } from '../persona/types.js';
 import {
   ensureDynamicPage,
@@ -120,7 +121,13 @@ async function keepOnlyHomePage(browser: Browser | null | undefined): Promise<vo
 
 /** 内核初始化选项 */
 export interface KernelInitializeOptions {
-  /** 人格来源①：包内 `data/personas/{personaId}.json`（默认 ak-night-worker） */
+  /**
+   * 人格目录：按 `{personaDir}/{personaId}.json` 查找（**personaId 即文件名**）。
+   * 默认包内 `data/personas`；主项目接入时指向自己的目录（如 `<主项目>/data/personas`），
+   * 之后直接传 `personaId` 即可。用 `listPersonas()` 可列出该目录下全部可用人格。
+   */
+  personaDir?: string;
+  /** 人格来源①：`personaDir` 下的 `{personaId}.json`（默认目录为包内 data/personas，默认 id 为 ak-night-worker） */
   personaId?: string;
   /** 人格来源②：外部人格配置文件绝对路径 */
   personaFile?: string;
@@ -180,7 +187,7 @@ export interface KernelStatus {
   dynamicCount: number;
 }
 
-/** 按选项解析人格：对象 > 文件 > 包内 id */
+/** 按选项解析人格：对象 > 文件 > personaDir 下的 personaId（文件名即 id） */
 function resolvePersona(opts: KernelInitializeOptions): PersonaConfig {
   if (opts.persona) {
     return opts.persona;
@@ -188,7 +195,7 @@ function resolvePersona(opts: KernelInitializeOptions): PersonaConfig {
   if (opts.personaFile) {
     return loadPersonaFromFile(opts.personaFile);
   }
-  return loadPersona(opts.personaId ?? 'ak-night-worker');
+  return loadPersona(opts.personaId ?? 'ak-night-worker', opts.personaDir);
 }
 
 /**
@@ -280,6 +287,20 @@ export class SimulationKernel {
     return this.persona;
   }
 
+  /**
+   * 列出当前人格目录下所有可用人格（**personaId = 文件名**）。
+   * 目录取 `initialize({ personaDir })` 指定的值，未指定则为包内 `data/personas`。
+   * 典型用法：宿主先 `listPersonas()` 拿到可选项，再用其中的 `id` 作为 `personaId` 启动。
+   */
+  listPersonas(): PersonaEntry[] {
+    return scanPersonaDir(this.options.personaDir ?? DEFAULT_PERSONA_DIR);
+  }
+
+  /** 当前生效的人格目录（未指定则为包内 `data/personas`） */
+  get personaDir(): string {
+    return this.options.personaDir ?? DEFAULT_PERSONA_DIR;
+  }
+
   /** 状态快照（日志/健康检查/status 指令用） */
   getStatus(): KernelStatus {
     return {
@@ -317,6 +338,15 @@ export class SimulationKernel {
 
     this.options = { ...options };
     this.persona = resolvePersona(options);
+    this.log(
+      `🎭 人格: ${this.persona.meta.name}（id=${this.persona.id}）｜来源: ${
+        options.persona
+          ? '（直接传入对象）'
+          : options.personaFile
+            ? options.personaFile
+            : `${this.personaDir}${path.sep}${this.persona.id}.json`
+      }`
+    );
     this.userDataDir = options.userDataDir ?? USER_DATA_DIR;
     this.headless = options.headless ?? true;
 
