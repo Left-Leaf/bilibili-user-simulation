@@ -435,7 +435,8 @@ export class SimulationKernel {
       const reports = await syncFetchTargets(ctx, targets).catch(() => []);
       for (const r of reports) {
         const tag = r.status === 'followed' ? '✅ 已关注' : r.status === 'now-followed' ? '➕ 新关注' : '⚠️ 失败';
-        this.log(`🎯 [蹲饼目标] ${tag} ${r.target.name || r.target.uid || '(未命名)'}${r.detail ? '｜' + r.detail : ''}`);
+        const label = `${r.name || '(未知 UP)'}（uid ${r.uid || '?'}）`;
+        this.log(`🎯 [蹲饼目标] ${tag} ${label}${r.detail ? '｜' + r.detail : ''}`);
       }
       this.fetchTargetsSynced = true;
     }
@@ -562,7 +563,10 @@ export class SimulationKernel {
    *   传 `holdTasks: false` 则完全不干预任务流；
    * - 幂等：已关注直接返回 `status: 'followed'`，不会重复点击。
    *
-   * @param target uid 字符串（纯数字）或 `{ uid, name }`
+   * 返回值中的 `uid` / `name` 是从 UP 主页**实际读取**到的信息（读取失败时回退为传入值），
+   * 可直接用于展示或后续定向蹲饼。
+   *
+   * @param target uid 字符串（纯数字）或 `{ uid }`
    */
   async followUp(target: string | FollowUpTarget, options: KernelFollowUpOptions = {}): Promise<FollowUpResult> {
     this.assertInitialized();
@@ -572,9 +576,8 @@ export class SimulationKernel {
       throw new Error('浏览器已断开：请重新 initialize()');
     }
     const uid = (typeof target === 'string' ? target : String(target?.uid ?? '')).trim();
-    const name = typeof target === 'string' ? undefined : target?.name;
     if (!/^\d+$/.test(uid)) {
-      return { target: { uid, name }, status: 'failed', detail: '需要 UP 的 uid（纯数字），例如 follow 161775300' };
+      return { uid, name: '', status: 'failed', detail: '需要 UP 的 uid（纯数字），例如 follow 161775300' };
     }
 
     // 仅在「模拟行为运行中」才需要协调；未运行时完全不干预
@@ -588,13 +591,18 @@ export class SimulationKernel {
       if (holdTasks) {
         fetchCoordinator.resume();
       }
-      return { target: { uid, name }, status: 'failed', detail: '无法打开临时标签页' };
+      return { uid, name: '', status: 'failed', detail: '无法打开临时标签页' };
     }
 
     try {
-      this.log(`➕ 主动关注 UP（uid=${uid}${name ? `｜${name}` : ''}，临时标签页操作）…`);
-      const result = await followUpOnPage(page, { uid, name });
-      this.log(result.status === 'failed' ? `❌ 关注失败：${result.detail}` : `✅ ${result.detail ?? '已关注'}`);
+      this.log(`➕ 主动关注 UP（uid=${uid}，临时标签页操作）…`);
+      const result = await followUpOnPage(page, { uid });
+      const label = `${result.name || '(未知 UP)'}（uid ${result.uid || uid}）`;
+      this.log(
+        result.status === 'failed'
+          ? `❌ 关注失败：${label}｜${result.detail ?? '未知原因'}`
+          : `✅ ${result.detail ?? '已关注'}｜UP: ${label}`
+      );
       return result;
     } finally {
       await page.close().catch(() => {}); // 关闭临时标签页（主操作页与任务流不受影响）

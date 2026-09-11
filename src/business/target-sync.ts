@@ -14,7 +14,7 @@
  * 避免误点成「取关」。
  */
 import type { TaskContext } from '../action/execute/context';
-import { extractLoginUser } from '../utils/bilibili-dom';
+import { extractLoginUser, extractUpProfileInfo } from '../utils/bilibili-dom';
 import { FollowTask } from '../action/task';
 
 /** UP 主页「关注按钮」候选选择器（取第一个可见者判断状态/点击） */
@@ -98,6 +98,10 @@ export interface TargetUp {
 /** 单个目标的处理结果 */
 export interface FetchTargetReport {
   target: TargetUp;
+  /** 实际 UP uid（纯数字）：主页读取，失败时回退输入 uid */
+  uid: string;
+  /** 实际 UP 名称：主页读取，失败时回退输入 name */
+  name: string;
   status: 'followed' | 'now-followed' | 'failed';
   detail?: string;
 }
@@ -118,29 +122,34 @@ export async function syncFetchTargets(ctx: TaskContext, targets: TargetUp[]): P
   const following = ownUid ? await fetchMyFollowingUids(page, ownUid).catch(() => null) : null;
 
   for (const t of targets) {
-    const label = t.name || t.uid || '(未命名)';
+    // 实际 UP 信息（进入主页后读取）；未取到时回退输入值
+    let info = { uid: String(t.uid ?? ''), name: t.name ?? '' };
     try {
       // 已在关注列表 → 无需处理
       if (t.uid && following?.has(String(t.uid))) {
-        reports.push({ target: t, status: 'followed', detail: '已在关注列表' });
+        reports.push({ target: t, ...info, status: 'followed', detail: '已在关注列表' });
         continue;
       }
       if (!t.uid) {
-        reports.push({ target: t, status: 'failed', detail: '缺 uid，暂不支持按名字搜索关注' });
+        reports.push({ target: t, ...info, status: 'failed', detail: '缺 uid，暂不支持按名字搜索关注' });
         continue;
       }
 
       // 进入目标 UP 主页
       await page.goto(`https://space.bilibili.com/${t.uid}`, { waitUntil: 'domcontentloaded' });
       await sleep(1500 + Math.random() * 1000);
+      const profile = await extractUpProfileInfo(page).catch(() => null);
+      if (profile) {
+        info = { uid: profile.uid || info.uid, name: profile.name || info.name };
+      }
 
       const state = await readFollowState(page);
       if (state === 'followed') {
-        reports.push({ target: t, status: 'followed', detail: '主页显示已关注' });
+        reports.push({ target: t, ...info, status: 'followed', detail: '主页显示已关注' });
         continue;
       }
       if (state === 'unknown') {
-        reports.push({ target: t, status: 'failed', detail: '无法确认关注按钮状态（选择器待实测）' });
+        reports.push({ target: t, ...info, status: 'failed', detail: '无法确认关注按钮状态（选择器待实测）' });
         continue;
       }
 
@@ -151,15 +160,15 @@ export async function syncFetchTargets(ctx: TaskContext, targets: TargetUp[]): P
         const after = await readFollowState(page);
         reports.push({
           target: t,
+          ...info,
           status: after === 'followed' ? 'now-followed' : 'now-followed',
           detail: after === 'followed' ? '已关注成功' : '已点击关注（等待页面确认，下轮对齐会复核）',
         });
-        void label;
       } else {
-        reports.push({ target: t, status: 'failed', detail: r?.error ?? '关注按钮不可用/不在主页' });
+        reports.push({ target: t, ...info, status: 'failed', detail: r?.error ?? '关注按钮不可用/不在主页' });
       }
     } catch (error) {
-      reports.push({ target: t, status: 'failed', detail: `异常: ${(error as Error).message}` });
+      reports.push({ target: t, ...info, status: 'failed', detail: `异常: ${(error as Error).message}` });
     }
   }
 

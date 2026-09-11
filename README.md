@@ -149,14 +149,20 @@ await runPersonaEngine({
 - 模拟行为运行时，仅在这几秒内**暂停「生成新任务」**（防止恰好有「关闭视频标签 / 切换主操作页」
   的任务与本次操作竞争标签页）；传 `no-hold`（或 `holdTasks: false`）则完全不干预；
 - **幂等**：已关注直接返回 `status: 'followed'`，不会重复点击；
-- 仅支持按 **uid**（纯数字）关注；失败返回 `status: 'failed'` + `detail`（如 uid 缺失、按钮不可用）。
+- **返回 UP 的 uid 与名称**：进主页后从页面**实际读取**（`uid` 取 URL，`name` 取 `#h-name` / `.nickname`），
+  uid 读取失败时回退为传入值；失败返回 `status: 'failed'` + `detail`（如 uid 非法、按钮不可用）。
+- 仅支持按 **uid**（纯数字）关注；UP 名称无需传入，由程序从主页读取后返回。
 
 ```ts
-const r = await kernel.followUp('161775300');            // 或 { uid: '161775300', name: '明日方舟' }
-// r: { target, status: 'followed' | 'now-followed' | 'failed', detail }
+const r = await kernel.followUp('161775300');
+// r: { uid: '161775300', name: '明日方舟', status: 'followed' | 'now-followed' | 'failed', detail? }
 await kernel.executeCommand('follow 161775300');          // 指令通道（留空 / 非数字会给出用法提示）
+// 指令输出形如：✅ 明日方舟（uid 161775300）｜已在关注列表（无需操作）
 await kernel.followUp('161775300', { holdTasks: false }); // 完全不干预任务流
 ```
+
+> `FollowUpTarget = { uid: string }`；`FollowUpResult` 为**平铺结构**：`{ uid, name, status, detail? }`（不含嵌套 target）。
+> 蹲饼目标对齐（`syncFetchTargets`）返回的 `FetchTargetReport` 同样带 `uid` / `name`（主页实际读取值）。
 
 > 与蹲饼目标对齐（`syncFetchTargets`）的区别：后者在**主操作页**上导航，只应在启动阶段调用；
 > 本功能随时可用（含模拟运行中），不会影响任务流。

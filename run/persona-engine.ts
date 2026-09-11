@@ -547,7 +547,7 @@ export async function runPersonaEngine(opts: PersonaRunOptions): Promise<void> {
       const reports = await syncFetchTargets(ctx, targets).catch(() => []);
       for (const r of reports) {
         const tag = r.status === 'followed' ? '✅ 已关注' : r.status === 'now-followed' ? '➕ 新关注' : '⚠️ 失败';
-        const who = r.target.name || r.target.uid || '(未命名)';
+        const who = `${r.name || '(未知 UP)'}（uid ${r.uid || '?'}）`;
         console.log(`[蹲饼目标]   ${tag} ${who}${r.detail ? '｜' + r.detail : ''}`);
       }
       targetsSyncedFor = persona.id;

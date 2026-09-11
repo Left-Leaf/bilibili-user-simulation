@@ -3,6 +3,7 @@ import type { TaskContext } from '../execute/context';
 import { MainState } from '../engine/state';
 import { MouseMoveBehavior, LeftClickBehavior } from '../behavior';
 import { MousePositionManager } from '../engine/mouse-position-manager';
+import { extractUpProfileInfo } from '../../utils/bilibili-dom';
 
 /**
  * 关注任务：明确目的「关注当前主页的 UP 主」的行为集合。
@@ -53,9 +54,14 @@ export class FollowTask extends BaseTask {
         }
       }
 
-      this.log(`➕ 已关注: ${page.url().slice(0, 60)}`);
+      // 读取目标 UP 信息（uid/名称）作为关注结果的返回内容
+      const profile = await extractUpProfileInfo(page).catch(() => null);
+      const uid = profile?.uid ?? '';
+      const name = profile?.name ?? '';
+
+      this.log(`➕ 已关注: ${name || '(未知 UP)'}（uid ${uid || '?'}）`);
       this.setNextState(MainState.USER_PROFILE);
-      return { success: true, data: { steps: steps.length } };
+      return { success: true, data: { steps: steps.length, uid, name } };
     } catch (error) {
       return { success: false, error: `关注失败: ${(error as Error).message}`, data: { steps: steps.length } };
     }

@@ -115,7 +115,11 @@ export function registerBuiltinCommands(register: (name: string, command: Kernel
         return { ok: false, output: '用法: follow <uid>（UP 的 uid，纯数字；带 no-hold 则连「暂停生成新任务」也不做）' };
       }
       const r = await kernel.followUp(uid, { holdTasks: !args.includes('no-hold') });
-      return { ok: r.status !== 'failed', output: `${r.status === 'failed' ? '❌' : '✅'} ${r.detail ?? r.status}` };
+      const label = `${r.name || '(未知 UP)'}（uid ${r.uid || uid}）`;
+      return {
+        ok: r.status !== 'failed',
+        output: `${r.status === 'failed' ? '❌' : r.status === 'now-followed' ? '➕' : '✅'} ${label}｜${r.detail ?? r.status}`,
+      };
     },
   });
 

@@ -523,6 +523,50 @@ export async function extractVideoPageInfo(page: Page): Promise<VideoPageInfo | 
   }
 }
 
+/** UP 主页信息（space.bilibili.com/{uid}） */
+export interface UpProfileInfo {
+  /** UP 的 uid（纯数字；优先取 URL，兜底读页内链接） */
+  uid: string;
+  /** UP 名（未取到为空串） */
+  name: string;
+}
+
+/**
+ * 提取 UP 主页（space.bilibili.com）的 uid 与名称。
+ * 只读 DOM、不发网络请求；两者都未取到返回 null。
+ */
+export async function extractUpProfileInfo(page: Page): Promise<UpProfileInfo | null> {
+  try {
+    const info = await page.evaluate(() => {
+      const pickText = (sels: string[]): string => {
+        for (const sel of sels) {
+          const t = document.querySelector(sel)?.textContent?.trim();
+          if (t) {
+            return t;
+          }
+        }
+        return '';
+      };
+      const uidFromUrl = location.href.match(/space\.bilibili\.com\/(\d+)/)?.[1] ?? '';
+      const uidFromLink =
+        Array.from(document.querySelectorAll<HTMLAnchorElement>('a[href*="space.bilibili.com/"]'))
+          .map((a) => a.href.match(/space\.bilibili\.com\/(\d+)/)?.[1] ?? '')
+          .find((v) => !!v) ?? '';
+      return {
+        uid: uidFromUrl || uidFromLink,
+        // UP 名：新版空间页 #h-name / .nickname；兼容旧版与视频页 .up-name
+        name: pickText(['#h-name', '.nickname', 'h1.nickname', '.user-name', '.up-name']),
+      };
+    });
+    if (!info.uid && !info.name) {
+      return null;
+    }
+    return info;
+  } catch {
+    return null;
+  }
+}
+
 /** 当前播放器状态（视频页 #bilibili-player video）。用于「视频提前播完自动连播」时修正剩余时间。 */
 export interface PlayerPlaybackState {
   /** 是否存在播放器 video 元素 */
