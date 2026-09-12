@@ -19,6 +19,12 @@ export interface PageFeatures {
   hasDynamicEntry: boolean;
   /** 当前活动页是否为视频页（/video/BV）——互动/连刷的目标页前提（防视频标签在后台时误判） */
   isVideoPage: boolean;
+  /** 当前活动页是否为动态页（t.bilibili.com）——浏览动态页的页面前提 */
+  isDynamicPage: boolean;
+  /** 当前活动页是否为主页（bilibili.com 根路径） */
+  isHomePage: boolean;
+  /** 当前活动页是否为用户页（UP 主页 space.bilibili.com/{uid}） */
+  isUserPage: boolean;
   /** 当前页是否有「关注」按钮（UP 主页且未关注）——Follow 任务的前置条件 */
   hasFollowButton: boolean;
   /** 浏览器标签列表里是否有视频页 */
@@ -27,7 +33,7 @@ export interface PageFeatures {
   videoTabCount: number;
   /** 浏览器总标签页数量（多余标签清理的依据） */
   tabCount: number;
-  /** 当前页统计到的全部 UP 主页入口（BrowseProfile 抉择目标用，同 OpenVideo 的 collectVideoEntries） */
+  /** 当前页统计到的全部 UP 主页入口（OpenProfile 抉择目标用，同 OpenVideo 的 collectVideoEntries） */
   profileEntries: ProfileEntry[];
 }
 
@@ -61,7 +67,7 @@ export interface GenerationContext {
   lastSuccess?: boolean;
   /** 上一个任务是否前置检查失败 */
   precheckFailed?: boolean;
-  /** BrowseProfile 结果：未找到 UP 入口需搜索跟进 */
+  /** OpenProfile 结果：未找到 UP 入口需搜索跟进 */
   needSearch?: boolean;
   /** OpenVideo 前置检查失败后需「关闭错误页 → 重开视频」的重试标志 */
   retryWatchVideo?: boolean;
@@ -89,10 +95,6 @@ export interface GenerationContext {
   pageFeatures?: PageFeatures;
   /** 本次上线（在线段）开始时间戳（休息决策用） */
   onlineStartAt?: number;
-  /** 强制下一个任务为登录（运行时 login 指令触发，Login 概率=1） */
-  forceLogin?: boolean;
-  /** 强制下一个任务为退出登录（运行时 logout 指令触发，Logout 概率=1） */
-  forceLogout?: boolean;
   /** 时钟源（取当前时间） */
   now?: () => number;
 }

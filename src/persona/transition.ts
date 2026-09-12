@@ -37,20 +37,51 @@ export function buildTransitionMatrix(persona: PersonaConfig): number[][] {
   });
 }
 
-/** 按矩阵从当前状态采样下一状态 */
-export function sampleNextState(matrix: number[][], from: MainState): MainState {
+/**
+ * 按矩阵从当前状态采样下一状态。
+ *
+ * @param exclude 要从分布中**剔除**的状态（如蹲饼开启期间剔除 `BROWSER_CLOSED`/下线）：
+ *   剔除后对剩余状态**重新归一化**，因此这些状态**根本不会被生成**。
+ *   （旧做法是「先生成再当场改写」，会把该状态的概率质量整体塞给某个固定状态、扭曲分布，
+ *   日志上也会误导成「跳过」。）
+ *   若剔除后已无可选项（整行都被剔除，理论上不该出现）→ 退回 `HOME_FEED`。
+ */
+export function sampleNextState(matrix: number[][], from: MainState, exclude?: readonly MainState[]): MainState {
   const row = matrix[mainStateIndex(from)];
   if (!row) {
     return MainState.HOME_FEED;
   }
+  const blocked = exclude && exclude.length > 0 ? new Set<MainState>(exclude) : null;
   let r = Math.random();
+  if (blocked) {
+    // 可选项权重总和（用于把随机数映射回未归一化的原权重）
+    let total = 0;
+    for (let i = 0; i < row.length; i++) {
+      if (!blocked.has(MAIN_STATES[i])) {
+        total += row[i];
+      }
+    }
+    if (total <= 0) {
+      return MainState.HOME_FEED; // 全部被剔除 → 无路可走，回首页
+    }
+    r *= total;
+  }
   for (let i = 0; i < row.length; i++) {
+    if (blocked?.has(MAIN_STATES[i])) {
+      continue;
+    }
     r -= row[i];
     if (r <= 0) {
       return MAIN_STATES[i];
     }
   }
-  return MAIN_STATES[row.length - 1];
+  // 浮点误差兜底：返回最后一个未被剔除的状态
+  for (let i = row.length - 1; i >= 0; i--) {
+    if (!blocked?.has(MAIN_STATES[i])) {
+      return MAIN_STATES[i];
+    }
+  }
+  return MainState.HOME_FEED;
 }
 
 /** 按 persona 的初始状态分布采样上线起点 */

@@ -1,45 +1,44 @@
 /**
  * SimulationKernel：全局静态单一实例「内核类」。
  *
- * 设计目标：把原来耦合在 `run/persona-engine.ts` 一个大 while 循环里的两件事**独立化**——
- *   1. 模拟行为（养号任务流）：PersonaDrivenGenerator + TaskExecutor
- *   2. 被动蹲饼（动态流捕获）：dynamic page + response 监听
- * 由本内核统一持有浏览器会话与资源，上层按需**独立开关**任意一个功能。
+ * 对外只暴露六类能力：
+ *   1. 生命周期：`initialize()`（选择浏览器启动方式等）/ `destroy()`（清除初始化信息、关闭浏览器、释放内存）
+ *   2. 人格配置：`loadPersona()`（运行态热替换）/ `listPersonas()`
+ *   3. 模拟行为：`startSimulation()` / `stopSimulation()`（控制任务生成器与执行器；**无暂停态**）
+ *   4. 动态获取：`startFetch()`（打开动态页并监听更新）/ `stopFetch()`（取消监听并关闭标签页）
+ *   5. 动态监听器：`createDynamicListener(cb)` → 订阅器（`cancel()` 取消订阅）
+ *   6. 登录：`login()` / `logout()`
+ *   （另有 `followUp()` 主动关注 UP，独立于任务流）
  *
- * 使用流程（三步）：
  * ```ts
- * import { SimulationKernel } from 'bilibili-user-simulation';
+ * import { kernel } from 'bilibili-user-simulation';
  *
- * const kernel = SimulationKernel.getInstance();   // 全局唯一实例
- * await kernel.initialize({ headless: true });     // ① 打开浏览器并登录
- * await kernel.startFetch();                       // ② 打开蹲饼（可独立开/关）
- * await kernel.startSimulation();                  // ② 打开模拟行为（可独立开/关）
+ * await kernel.initialize({ headless: true, personaId: 'ak-night-worker' }); // ① 初始化
+ * const sub = kernel.createDynamicListener((items, kind) => {});             // ② 订阅动态
+ * await kernel.startFetch();        // ③ 打开动态获取
+ * await kernel.startSimulation();   // ④ 打开模拟行为
  * ...
- * await kernel.stopSimulation();                   // 只关模拟行为，蹲饼继续跑
- * await kernel.stopFetch();                        // 只关蹲饼，浏览器保持
- * await kernel.shutdown();                         // 全部关闭 + 关浏览器
- * ```
- *
- * 指令控制（可选）：把「打开 / 关闭功能」变成可下发的指令，便于终端、IPC、HTTP、定时任务统一控制。
- * ```ts
- * kernel.attachConsole();                          // stdin 通道：终端输入 sim off / fetch on / status / help
- * await kernel.executeCommand('sim off');          // 任意通道：直接下发指令字符串，拿回 { ok, output }
- * kernel.registerCommand('quit', { ... });         // 扩展自定义指令
+ * sub.cancel();
+ * await kernel.stopSimulation();
+ * await kernel.stopFetch();
+ * await kernel.destroy();           // ⑤ 销毁
  * ```
  *
  * 语义要点：
  * - `initialize()` 只做「开浏览器 + 确保登录」，不启动任何功能（登录态有效时自动跳过扫码）；
  * - `startSimulation()/stopSimulation()` 与 `startFetch()/stopFetch()` **互不影响**，可任意组合；
+ * - 模拟行为只有「从零启动」与「彻底结束」两种状态，**没有暂停**；
  * - `stopSimulation()` 阻塞生成器 + 请求持续式任务收尾，等最后一个任务跑完后关闭不再需要的页面
- *   （蹲饼未开 → 页面全关；蹲饼开着 → 只留蹲饼用的动态页）；没有暂停态，只有「从零打开 / 彻底结束」；
- * - `stopFetch()` 默认只停止「解析/投递/触发」，页面与增量基线保留，重新开启不会重复投递历史动态；
+ *   （蹲饼未开 → 页面全关；蹲饼开着 → 只留蹲饼用的动态页）；
+ * - `stopFetch()` 取消监听并关闭动态页标签，并**返回本次蹲饼的最终基线**（秒时间戳），
+ *   宿主应保存它并在下次 `startFetch({ baselineTs })` 传回；
  * - 进程内只有一份蹲饼状态（passive-fetch 模块级单例）与一份浏览器会话，天然与内核单例对应。
  */
 import path from 'node:path';
-import readline from 'node:readline';
 import { createContext, type TaskContext } from '../action/execute/context.js';
 import { OpenBrowserBehavior, NavigateBehavior } from '../action/behavior/navigation.js';
 import { LoginTask } from '../action/task/login.js';
+import { LogoutTask } from '../action/task/logout.js';
 import { TaskExecutor } from '../action/execute/executor.js';
 import { PersonaDrivenGenerator, type GeneratorControl } from '../action/generate/persona-generator.js';
 import { DEFAULT_PERSONA_DIR, listPersonas as scanPersonaDir, loadPersona, loadPersonaFromFile, type PersonaEntry } from '../persona/loader.js';
@@ -47,31 +46,20 @@ import type { PersonaConfig } from '../persona/types.js';
 import {
   ensureDynamicPage,
   findDynamicPage,
-  getCollectedDynamics,
-  getDynamicCount,
+  getFetchBaseline,
   setDynamicListener,
+  setFetchBaseline,
   setFetchEnabled,
-  setFetchReportConfig,
+  waitForFetchIdle,
   waitForInitialFetch,
 } from '../business/passive-fetch.js';
-import type { BiliDynamicItem, DynamicListener, FetchReportConfig } from '../business/passive-fetch.js';
-import { fetchCoordinator } from '../business/fetch-coordinator.js';
+import type { BiliDynamicItem, DynamicListener, InitialFetchOutcome } from '../business/passive-fetch.js';
+import { EXCLUSIVE_TASKS, fetchCoordinator } from '../business/fetch-coordinator.js';
 import { followUpOnPage, type FollowUpResult, type FollowUpTarget } from '../business/follow-up.js';
 import { isVideoPageUrl } from '../utils/bilibili-dom.js';
 import { installPageRuntimeShim } from '../utils/page-runtime.js';
 import { packagePath } from '../utils/paths.js';
 import type { Browser, Page } from 'puppeteer-core';
-import { registerBuiltinCommands, type KernelCommand, type KernelCommandContext, type KernelCommandResult } from './commands.js';
-
-/** 指令控制台选项（stdin 通道） */
-export interface KernelConsoleOptions {
-  /** 输入流（默认 process.stdin） */
-  input?: NodeJS.ReadableStream;
-  /** 输出流（默认 process.stdout） */
-  output?: NodeJS.WritableStream;
-  /** Ctrl+C 回调（默认仅卸载控制台，不退出进程；退出语义交给宿主决定） */
-  onInterrupt?: () => void;
-}
 
 /** 默认浏览器用户数据目录（持久化登录态；与独立启动入口一致） */
 const USER_DATA_DIR = packagePath('puppeteer-browser', 'data');
@@ -119,8 +107,8 @@ async function keepOnlyHomePage(browser: Browser | null | undefined): Promise<vo
   await home?.bringToFront().catch(() => {});
 }
 
-/** 内核初始化选项 */
-export interface KernelInitializeOptions {
+/** 人格来源（优先级：`persona` 对象 > `personaFile` > `personaDir` / `personaId`） */
+export interface KernelPersonaSource {
   /**
    * 人格目录：按 `{personaDir}/{personaId}.json` 查找（**personaId 即文件名**）。
    * 默认包内 `data/personas`；主项目接入时指向自己的目录（如 `<主项目>/data/personas`），
@@ -133,16 +121,16 @@ export interface KernelInitializeOptions {
   personaFile?: string;
   /** 人格来源③：直接传入人格对象（优先级最高） */
   persona?: PersonaConfig;
+}
+
+/** 内核初始化选项 */
+export interface KernelInitializeOptions extends KernelPersonaSource {
   /** 无头模式（默认 true） */
   headless?: boolean;
   /** 浏览器用户数据目录（默认 包根/puppeteer-browser/data） */
   userDataDir?: string;
   /** 额外 Chrome 启动参数（追加在内置参数之后） */
   browserArgs?: string[];
-  /** 动态监听回调：注册后捕获的动态交给回调（不再自动外发/落盘） */
-  onDynamics?: DynamicListener | null;
-  /** 动态外发配置（不传则沿用被动蹲饼默认出口：写本地文档） */
-  fetchReport?: FetchReportConfig;
   /** 未登录时是否阻塞等待扫码登录（默认 true） */
   waitForLogin?: boolean;
   /** 登录未完成时的自动重试间隔（默认 4000ms） */
@@ -153,18 +141,17 @@ export interface KernelInitializeOptions {
   verbose?: boolean;
 }
 
-/** 打开蹲饼的选项 */
+/** 打开动态获取（蹲饼）的选项 */
 export interface KernelFetchOptions {
-  /** 初次获取等待上限（默认 25000ms；超时不阻塞，守护继续重试） */
+  /**
+   * 增量基线（**秒**时间戳）：该时间**之后**的动态都会获取并投递（不会缺失）。
+   * 缺省 = 当前时间（只投递开启之后新产生的动态）。宿主应保存上次 `stopFetch()` 的返回值并传回。
+   */
+  baselineTs?: number;
+  /** 首屏 feed/all 响应等待上限（默认 25000ms；超时不阻塞，守护继续重试） */
   initialTimeoutMs?: number;
   /** 动态页守护间隔（默认 60000ms；动态页丢失/被切走时自动补开） */
   watchdogIntervalMs?: number;
-}
-
-/** 关闭蹲饼的选项 */
-export interface KernelStopFetchOptions {
-  /** 是否同时关闭动态页标签（默认 false：仅停止捕获，页面保留以便快速重开） */
-  closePage?: boolean;
 }
 
 /** 主动关注 UP 的选项 */
@@ -178,26 +165,16 @@ export interface KernelFollowUpOptions {
   holdTasks?: boolean;
 }
 
-/** 内核状态快照 */
-export interface KernelStatus {
-  /** 是否已初始化（浏览器已打开） */
-  initialized: boolean;
-  /** 当前是否处于登录态 */
-  loggedIn: boolean;
-  /** 模拟行为是否运行中（只有「运行中 / 彻底结束」两种状态，无暂停态） */
-  simulationRunning: boolean;
-  /** 蹲饼是否运行中 */
-  fetchRunning: boolean;
-  /** 当前主操作页 URL */
-  currentPageUrl: string;
-  /** 累计任务事件数 */
-  taskCount: number;
-  /** 已捕获动态条数 */
-  dynamicCount: number;
+/** 动态订阅器（类似 Flutter `StreamSubscription`）：`cancel()` 取消订阅 */
+export interface DynamicSubscription {
+  /** 是否仍在订阅中 */
+  readonly active: boolean;
+  /** 取消订阅（幂等） */
+  cancel(): void;
 }
 
 /** 按选项解析人格：对象 > 文件 > personaDir 下的 personaId（文件名即 id） */
-function resolvePersona(opts: KernelInitializeOptions): PersonaConfig {
+function resolvePersona(opts: KernelPersonaSource): PersonaConfig {
   if (opts.persona) {
     return opts.persona;
   }
@@ -229,10 +206,8 @@ export class SimulationKernel {
     return SimulationKernel.getInstance();
   }
 
-  /** 单例：禁止外部 new（构造时注册内置指令） */
-  private constructor() {
-    registerBuiltinCommands((name, command) => this.registerCommand(name, command));
-  }
+  /** 单例：禁止外部 new */
+  private constructor() {}
 
   // ===== 内部状态 =====
   private options: KernelInitializeOptions = {};
@@ -244,7 +219,7 @@ export class SimulationKernel {
   private headless = true;
 
   /** 生成器运行时控制（内核模式下只用于「停止模拟行为」） */
-  private control: GeneratorControl = { stopped: false, forceLogin: false };
+  private control: GeneratorControl = { stopped: false };
 
   private initialized = false;
   private loggedIn = false;
@@ -254,78 +229,32 @@ export class SimulationKernel {
   private stopSimulationTask: Promise<void> | null = null;
   private stoppingSimulation = false;
 
-  /** 指令表（指令名 → 定义；支持 registerCommand 扩展） */
-  private commands = new Map<string, KernelCommand>();
-  /** stdin 控制台卸载函数（attachConsole 返回，shutdown 时自动摘除） */
-  private consoleDetach: (() => void) | null = null;
-
   private fetchRunning = false;
   private fetchWatchdog: ReturnType<typeof setInterval> | null = null;
 
-  // ===== 只读查询 =====
+  /** 动态监听订阅者（`createDynamicListener` 注册；捕获到的动态分发给它们） */
+  private dynamicListeners = new Set<DynamicListener>();
 
-  /** 内核是否已初始化（浏览器已打开） */
-  get isInitialized(): boolean {
-    return this.initialized;
-  }
+  // ===== 内部只读（不对外暴露） =====
 
-  /** 模拟行为是否运行中 */
-  get isSimulationRunning(): boolean {
-    return this.simulationRunning;
-  }
-
-  /** 蹲饼是否运行中 */
-  get isFetchRunning(): boolean {
-    return this.fetchRunning;
-  }
-
-  /** 当前浏览器实例（未初始化时为 null） */
-  get browser(): Browser | null {
-    return this.ctx?.browser ?? null;
-  }
-
-  /** 当前主操作页（未初始化/已关闭时为 null） */
-  get page(): Page | null {
+  /** 当前主操作页（未初始化 / 已关闭时为 null） */
+  private get page(): Page | null {
     const p = this.ctx?.page;
     return p && !p.isClosed() ? p : null;
   }
 
-  /** 当前人格配置（未初始化时为 null） */
-  get currentPersona(): PersonaConfig | null {
-    return this.persona;
+  /** 当前生效的人格目录（未指定则为包内 `data/personas`） */
+  private get personaDir(): string {
+    return this.options.personaDir ?? DEFAULT_PERSONA_DIR;
   }
 
   /**
    * 列出当前人格目录下所有可用人格（**personaId = 文件名**）。
-   * 目录取 `initialize({ personaDir })` 指定的值，未指定则为包内 `data/personas`。
-   * 典型用法：宿主先 `listPersonas()` 拿到可选项，再用其中的 `id` 作为 `personaId` 启动。
+   * 目录取 `initialize({ personaDir })` / `loadPersona({ personaDir })` 指定的值，
+   * 未指定则为包内 `data/personas`。
    */
   listPersonas(): PersonaEntry[] {
     return scanPersonaDir(this.options.personaDir ?? DEFAULT_PERSONA_DIR);
-  }
-
-  /** 当前生效的人格目录（未指定则为包内 `data/personas`） */
-  get personaDir(): string {
-    return this.options.personaDir ?? DEFAULT_PERSONA_DIR;
-  }
-
-  /** 状态快照（日志/健康检查/status 指令用） */
-  getStatus(): KernelStatus {
-    return {
-      initialized: this.initialized,
-      loggedIn: this.loggedIn,
-      simulationRunning: this.simulationRunning,
-      fetchRunning: this.fetchRunning,
-      currentPageUrl: this.page?.url() ?? '',
-      taskCount: this.ctx?.logs.length ?? 0,
-      dynamicCount: getDynamicCount(),
-    };
-  }
-
-  /** 已捕获的动态（**B 站原始 item**，最新在前） */
-  getDynamics(limit?: number): BiliDynamicItem[] {
-    const all = getCollectedDynamics();
-    return typeof limit === 'number' && limit > 0 ? all.slice(0, limit) : all;
   }
 
   // ===== ① 初始化：打开浏览器 + 登录 =====
@@ -358,28 +287,15 @@ export class SimulationKernel {
     this.userDataDir = options.userDataDir ?? USER_DATA_DIR;
     this.headless = options.headless ?? true;
 
-    // 动态出口（与独立启动入口语义一致）：模块监听优先，其次外发配置
-    setDynamicListener(options.onDynamics ?? null);
-    if (options.fetchReport) {
-      setFetchReportConfig(options.fetchReport);
-    }
-
     this.log(`🚀 内核初始化：打开浏览器（headless=${this.headless}）…`);
     const ctx = await this.openBrowser();
     this.ctx = ctx;
 
+    // 注册「模拟状态」快照器：蹲饼会话开始前快照、结束后恢复（见 passive-fetch 的会话流程）
+    fetchCoordinator.snapshotSimulationState = () => this.snapshotForFetchSession();
+
     // 生成器 + 执行器（登录流程任务不经生成器，直接交给执行器 runTask）
-    this.generator = new PersonaDrivenGenerator(this.persona, {
-      maxTasks: 1_000_000, // 仅防死循环，实际由 stopSimulation / BROWSER_CLOSED 决定
-      sessionDurationMs: Number.MAX_SAFE_INTEGER, // 无时长上限
-      now: () => Date.now(),
-    });
-    this.generator.setControl(this.control);
-    this.executor = new TaskExecutor(this.generator, ctx, {
-      verbose: !!options.verbose,
-      stopOnError: false,
-      maxTasks: Number.MAX_SAFE_INTEGER, // 与生成器一致：任务流只由「停止模拟 / 浏览器关闭」结束
-    });
+    this.createGeneratorAndExecutor();
 
     // 内核模式：内核没有「关浏览器 → 离线等待 → 重新上线」的编排，禁止任务关闭浏览器
     // （RestTask 长休息据此降级为「停止活动」，浏览器保持打开）
@@ -396,28 +312,104 @@ export class SimulationKernel {
     return this;
   }
 
+  // ===== ② 人格配置：加载 / 运行态热替换 =====
+
   /**
-   * 确保登录（未登录则执行登录任务并等待扫码）。
+   * 加载（或运行态热替换）人格配置。
+   *
+   * - 未初始化时可调用（仅记录人格，待 `initialize()` 生效）；
+   * - **运行态热替换**：模拟正在运行时，让生成器立即改用新人格 ——
+   *   后续任务按新人格决策，**不打断当前任务流、不碰页面、不重置状态机**；
+   * - 省略的字段沿用上次的值（如只传 `personaId` 会复用之前的 `personaDir`）。
+   * @returns 加载后的人格配置
+   */
+  async loadPersona(options: KernelPersonaSource = {}): Promise<PersonaConfig> {
+    // 未显式指定人格来源 → 沿用上次的；否则 personId/personaDir 可单独覆盖
+    const explicit = !!(options.persona || options.personaFile || options.personaId || options.personaDir);
+    const source: KernelPersonaSource = explicit
+      ? {
+          personaDir: options.personaDir ?? this.options.personaDir,
+          personaId: options.personaId,
+          personaFile: options.personaFile,
+          persona: options.persona,
+        }
+      : {
+          personaDir: this.options.personaDir,
+          personaId: this.options.personaId,
+          personaFile: this.options.personaFile,
+          persona: this.options.persona,
+        };
+
+    const persona = resolvePersona(source);
+    this.persona = persona;
+    this.options = { ...this.options, ...source };
+    this.log(`🎭 人格已加载: ${persona.meta.name}（id=${persona.id}）`);
+
+    // 运行态热替换：生成器立即改用新人格（重建转移矩阵）；未初始化时仅记录，待 initialize() 生效
+    this.generator?.setPersona(persona);
+    return persona;
+  }
+
+  /** 确保登录（未登录则执行登录任务并等待扫码）。
    * 与 `initialize()` 内置的登录等待一致，供随时手动调用（如登录态失效后，或 `waitForLogin: false` 初始化后补登录）。
    * @returns 是否已处于登录态
    */
   async login(): Promise<boolean> {
     this.assertInitialized();
+    // 登录是最高优先级任务（额外任务，不走模拟循环）：**首先关闭蹲饼与模拟**，再执行登录
+    // （stopFetch 内部会等在跑的蹲饼会话让出浏览器）
+    await this.stopFetch().catch(() => {});
+    await this.stopSimulation().catch(() => {});
+    // 模拟停止后会清理页面（蹲饼已关则全关）→ 重建可用页，否则 ensureLoggedIn 因无页面直接返回 false
+    await this.ensureUsablePage().catch(() => {});
     this.loggedIn = await this.ensureLoggedIn(true);
     return this.loggedIn;
   }
 
-  // ===== ② 蹲饼：独立开关 =====
+  /**
+   * 退出登录：先中止模拟行为 → 执行登出任务 → 浏览器保持打开（等待 `login()` 重新扫码）。
+   * @returns 是否已退出登录（本来未登录时返回 false）
+   */
+  async logout(): Promise<boolean> {
+    this.assertInitialized();
+    if (!this.loggedIn) {
+      this.log('ℹ️ 当前未登录，无需退出');
+      return false;
+    }
+    // 登出是最高优先级任务（额外任务，不走模拟循环）：**首先关闭蹲饼与模拟**，再执行登出
+    // （stopFetch 内部会等在跑的蹲饼会话让出浏览器）
+    await this.stopFetch().catch(() => {});
+    await this.stopSimulation().catch(() => {});
+    // 模拟停止后会清理页面（蹲饼已关则全关）→ 重建可用页供登出流程使用
+    await this.ensureUsablePage().catch(() => {});
+    await this.executor!.runTask(new LogoutTask()).catch((error) => {
+      this.log(`⚠️ 退出登录任务执行失败: ${(error as Error).message}`);
+    });
+
+    const page = this.page;
+    this.loggedIn = page ? await this.checkLogin(page).catch(() => this.loggedIn) : this.loggedIn;
+    this.log(
+      this.loggedIn
+        ? '⚠️ 退出登录未完成（仍处于登录态）'
+        : '🔒 已退出登录（浏览器保持打开，可调用 login() 重新登录）'
+    );
+    return !this.loggedIn;
+  }
+
+  // ===== ③ 动态获取：启动 / 关闭 =====
 
   /**
-   * 打开蹲饼：打开动态页并挂监听 → 等初次获取 → 启动守护。
+   * 打开蹲饼：设置基线 → 打开动态页并挂监听 → 等初始增量获取到基线 → 启动守护。
    *
-   * 采集范围 = **关注流全部 UP**的动态（不读人格配置）；新增关注用 `followUp()` / `follow` 指令。
+   * 采集范围 = **关注流全部 UP**的动态（不读人格配置）；新增关注用 `followUp()`。
+   * 采集语义 = **不缺失**：`baselineTs` 之后的动态会全部获取并投递；单批（约 20 条）不够时会
+   * 强制滚动补全直到翻过基线；若滚动到底仍未到达基线，则返回 false 并把基线重置为最新已获取。
    *
-   * 重复调用幂等；返回是否成功打开动态页（false 时守护仍会持续重试）。
+   * 重复调用幂等（基线以首次为准）；返回是否「已覆盖基线」（false = 打开失败 / 补全未达基线 / 首屏超时）。
    */
   async startFetch(options: KernelFetchOptions = {}): Promise<boolean> {
     this.assertInitialized();
+    this.assertLoggedIn('启用蹲饼');
     if (this.fetchRunning) {
       this.log('ℹ️ 蹲饼已在运行，跳过重复开启');
       return true;
@@ -439,11 +431,22 @@ export class SimulationKernel {
     // 主操作页可能已失效（如模拟刚结束时的页面清理）→ 重建，保证后续任务/蹲饼有可用页
     await this.ensureUsablePage().catch(() => {});
 
+    // 本次蹲饼的增量基线：之后的动态都会获取并投递（不传 = 当前时间）
+    setFetchBaseline(options.baselineTs);
     const dynPage = await ensureDynamicPage(ctx).catch(() => null);
+    let outcome: InitialFetchOutcome = 'timeout';
     if (dynPage) {
       this.log(`🥞 蹲饼就绪：动态页 ${dynPage.url().slice(0, 60)}`);
-      const ready = await waitForInitialFetch(dynPage, options.initialTimeoutMs ?? 25_000).catch(() => false);
-      this.log(ready ? '🥞 蹲饼初次获取完成' : '🥞 蹲饼初次获取超时（后台照常，守护会继续重试）');
+      outcome = await waitForInitialFetch(dynPage, options.initialTimeoutMs ?? 25_000).catch(
+        () => 'timeout' as InitialFetchOutcome
+      );
+      if (outcome === 'ready') {
+        this.log('🥞 初始增量已覆盖基线（之后新动态照常投递）');
+      } else if (outcome === 'catchup-failed') {
+        this.log('❌ 初始增量未到达基线（已滚动到底）；可见范围内已全部投递，基线已重置为最新获取动态');
+      } else {
+        this.log('🥞 首屏响应等待超时（后台照常，守护会继续重试）');
+      }
       if (this.page && this.page !== dynPage) {
         await this.page.bringToFront().catch(() => {}); // 动态页作为后台常驻标签
       }
@@ -457,36 +460,57 @@ export class SimulationKernel {
     }
     const interval = options.watchdogIntervalMs ?? 60_000;
     this.fetchWatchdog = setInterval(() => {
-      void this.fetchWatchdogTick();
+      void this.fetchWatchdogTick().catch(() => undefined);
     }, interval);
     this.fetchWatchdog.unref?.();
 
-    return !!dynPage;
+    // 打开成功但没覆盖到基线（到底/超时）→ 返回 false（蹲饼仍在运行，新动态照常投递）
+    return !!dynPage && outcome === 'ready';
   }
 
   /**
-   * 关闭蹲饼：停止守护与动态解析/投递。
-   * 默认保留动态页标签与增量基线（重新开启不会重复投递关闭期间的动态）。
+   * 关闭动态获取：**关总开关 → 等正在进行的会话/补全让出浏览器 → 关守护与动态页标签**。
+   *
+   * `await stopFetch()` 返回即代表「蹲饼已完全停止、浏览器已让出」。
+   * 仅关开关只是「通知」：`runFetchSession` / 滚动补全是监听器里 `void ...` 触发的游离异步任务，
+   * 与 stopFetch 并无 await 关系，它们会在下一个检查点才退出；不等就直接关页/跑登录，
+   * 会与它们的切前台/滚动/刷新/关页重开并发。
+   *
+   * @returns 本次蹲饼的最终基线（秒时间戳；0 = 本次未设置），宿主应保存并在下次 `startFetch` 传回
    */
-  async stopFetch(options: KernelStopFetchOptions = {}): Promise<void> {
-    if (!this.fetchRunning) {
-      return;
-    }
+  async stopFetch(): Promise<number> {
+    // ① 无论是否处于「运行中」，都先把总开关关掉：监听器即使残留也不会再解析/投递/触发
+    setFetchEnabled(false);
+    fetchCoordinator.setLongRestDisabled(false); // 撤销「禁止长休息」：恢复人格原本的长休息概率
     if (this.fetchWatchdog) {
       clearInterval(this.fetchWatchdog);
       this.fetchWatchdog = null;
     }
-    setFetchEnabled(false);
-    fetchCoordinator.resume(); // 若关闭瞬间正处于「蹲饼暂停任务流」，解开暂停
-    fetchCoordinator.setLongRestDisabled(false); // 抳销「禁止长休息」：恢复人格原本的长休息概率
 
-    if (options.closePage && this.ctx?.browser) {
+    const wasRunning = this.fetchRunning;
+    if (wasRunning) {
+      fetchCoordinator.resume(); // 若关闭瞬间正处于「蹲饼暂停任务流」，解开暂停
+      this.fetchRunning = false;
+    }
+
+    // ② 等在跑的会话 / 滚动补全让出浏览器（无会话时立即返回；超时兜底见 waitForFetchIdle）
+    await waitForFetchIdle();
+    if (!wasRunning) {
+      return getFetchBaseline();
+    }
+
+    // ③ 关闭动态页标签（此时已无会话在使用它）
+    if (this.ctx?.browser) {
       const dynPage = await findDynamicPage(this.ctx.browser, this.page ?? undefined).catch(() => null);
       await dynPage?.close().catch(() => {});
     }
 
-    this.fetchRunning = false;
-    this.log('🛑 蹲饼已关闭（监听保留、增量基线保留，可随时 startFetch() 重开）');
+    const baseline = getFetchBaseline();
+    this.log(
+      `🛑 动态获取已关闭｜最终基线：${baseline > 0 ? new Date(baseline * 1000).toLocaleString('zh-CN', { hour12: false }) : '（未设置）'}` +
+        `｜下次 startFetch({ baselineTs }) 传回即可无缝续接（不传则从当前时间开始）`
+    );
+    return baseline;
   }
 
   /**
@@ -529,9 +553,67 @@ export class SimulationKernel {
     if (isVideoPageUrl(this.page.url())) {
       return; // 视频消费中，不新开标签打扰观看
     }
+    if (EXCLUSIVE_TASKS.has(fetchCoordinator.currentTaskName)) {
+      return; // 登录/登出（最高优先级任务）期间不打扰
+    }
     const dynPage = await ensureDynamicPage(ctx).catch(() => null);
     if (dynPage && this.page && this.page !== dynPage) {
       await this.page.bringToFront().catch(() => {});
+    }
+  }
+
+  // ===== ⑤ 动态监听器 =====
+
+  /**
+   * 创建一个动态监听器：传入回调，返回**订阅器**（类似 Flutter `StreamSubscription`）。
+   *
+   * - 回调参数：`(items, kind)`——`items` 为 **B 站原始动态 item** 数组，
+   *   `kind` 为 `'INIT'`（**本次 `startFetch` 的首次投递**，只有一次）或 `'UPDATE'`（其余全部：点击获取 / 刷新 / 滚动补全 / 重开页拉回的增量）。
+   *   ⚠️ 两种 kind 都是**增量**（只含 `baselineTs` 之后、没投递过的动态，不是全量快照）→ 宿主应当**追加**，不要按 `'INIT'` 重建列表；
+   * - 可在 `initialize()` 前后调用（订阅在 initialize 时统一接入蹲饼出口）；
+   * - 取消订阅：`subscription.cancel()`（幂等）；`destroy()` 会清空全部订阅。
+   */
+  createDynamicListener(listener: DynamicListener): DynamicSubscription {
+    let active = true;
+    const wrapped: DynamicListener = (items, kind) => {
+      if (active) {
+        listener(items, kind);
+      }
+    };
+    this.dynamicListeners.add(wrapped);
+    this.syncDynamicListener();
+    return {
+      get active(): boolean {
+        return active;
+      },
+      cancel: (): void => {
+        if (!active) {
+          return;
+        }
+        active = false;
+        this.dynamicListeners.delete(wrapped);
+        this.syncDynamicListener();
+      },
+    };
+  }
+
+  /**
+   * 按当前订阅情况接入 / 摘除蹲饼出口（无订阅者时置空，避免空转发器占用出口）。
+   */
+  private syncDynamicListener(): void {
+    setDynamicListener(
+      this.dynamicListeners.size > 0 ? (items, kind) => this.dispatchDynamics(items, kind) : null
+    );
+  }
+
+  /** 把捕获到的动态分发给全部订阅者（单个回调抛错不影响其它订阅） */
+  private dispatchDynamics(items: BiliDynamicItem[], kind: 'INIT' | 'UPDATE'): void {
+    for (const listener of [...this.dynamicListeners]) {
+      try {
+        listener(items, kind);
+      } catch (error) {
+        this.log(`⚠️ 动态监听回调出错: ${(error as Error).message}`);
+      }
     }
   }
 
@@ -613,17 +695,18 @@ export class SimulationKernel {
     }
   }
 
-  // ===== ③ 模拟行为：独立开关 =====
+  // ===== ④ 模拟行为：启动 / 中止 =====
 
   /**
    * 打开模拟行为：从零启动人格驱动的任务流（Markov 游走 → 任务生成 → 执行）。
    *
-   * - 后台运行（本方法在任务流启动后立即返回）；用 `waitSimulation()` 可等待其结束；
+   * - 后台运行（本方法在任务流启动后立即返回）；
    * - 与蹲饼相互独立：蹲饼运行时开模拟行为，两者通过 fetchCoordinator 自动协调；
-   * - 重复调用幂等；每次都是「从零开始」（生成器状态机 reset）。
+   * - 重复调用幂等；每次都是「从零开始」（生成器状态机 reset）；**没有暂停态**。
    */
   async startSimulation(): Promise<void> {
     this.assertInitialized();
+    this.assertLoggedIn('启动模拟行为');
     if (this.simulationRunning) {
       this.log('ℹ️ 模拟行为已在运行，跳过重复开启');
       return;
@@ -636,7 +719,6 @@ export class SimulationKernel {
     ctx.terminated = false;
     ctx.terminationReason = undefined;
     this.control.stopped = false;
-    this.control.reloadRequested = false;
     this.generator!.reset(ctx);
     this.generator!.setPaused(false);
     fetchCoordinator.resume();
@@ -694,11 +776,6 @@ export class SimulationKernel {
     }
   }
 
-  /** 等待当前模拟行为结束（未运行则立即返回） */
-  async waitSimulation(): Promise<void> {
-    await this.simulationTask?.catch(() => {});
-  }
-
   /** 模拟行为执行循环：单次 execute()（生成器未停止时会一直生成任务） */
   private async runSimulationLoop(): Promise<void> {
     try {
@@ -719,11 +796,25 @@ export class SimulationKernel {
    * 关闭不再需要的页面（模拟结束后调用）：
    * - 蹲饼**未**开启 → 关闭全部页面（浏览器保持打开，等待下次 startSimulation）；
    * - 蹲饼**已**开启 → 保留蹲饼需要的动态页，其余页面关闭；主操作页被关时重建一个主页页。
+   *
+   * 前提：**页面已安全**（无任务主体还在用它）。被强制结束的持续性任务主体可能仍在后台跑，
+   * 先等它们真正退出（见 `fetchCoordinator.waitZombieBodies`）——否则一关页，
+   * 主体的后续操作就会落到接回来的新页面上（实测：蹲饼让位 WatchVideo 后台主仍在动页面）。
    */
   private async closeIdlePages(): Promise<void> {
     const ctx = this.ctx;
     const browser = ctx?.browser;
     if (!ctx || !browser || !browser.isConnected()) {
+      return;
+    }
+    // 等「僵尸主体」真正退出（有界等待：主体正常会在几秒内到达中断检查点）
+    if (!(await fetchCoordinator.waitZombieBodies())) {
+      // 仍有主体在跑 → **跳过本次清理**：保留页面比「在主体脚下关页」安全得多
+      // （页面留着不影响功能：下次 stopSimulation / startSimulation 时会重新清理）
+      this.log(
+        `⚠️ 仍有 ${fetchCoordinator.zombieBodies.size} 个任务主体未退出（等待超时）：跳过本次页面清理，` +
+          `避免在主体操作页面时关页（下次停止/启动模拟时会重新清理）`
+      );
       return;
     }
     const pages = (await browser.pages().catch(() => [] as Page[])).filter((p) => !p.isClosed());
@@ -768,117 +859,62 @@ export class SimulationKernel {
     this.log(`📄 已重建主操作页: ${reuse.url().slice(0, 60)}`);
   }
 
-  // ===== ④ 指令控制：用指令打开 / 关闭功能 =====
-
   /**
-   * 注册（或覆盖）一条指令，用于扩展内核的指令控制能力。
+   * 蹲饼会话开始前的「模拟状态」快照：返回恢复函数，由蹲饼在会话结束（含异常）后调用。
    *
-   * @example
-   * kernel.registerCommand('quit', {
-   *   description: '关闭内核并退出进程',
-   *   handler: async ({ kernel }) => { await kernel.shutdown(); process.exit(0); },
-   * });
+   * 蹲饼会切前台、点按钮、刷新、必要时关页重开——都可能破坏模拟对页面的假设。
+   * 快照记录主操作页 URL 与滚动位置；恢复时：主操作页被关 → 接回一个可用页；切回前台；
+   * URL 未变（未被蹲饼导航走）则还原会话前的滚动位置。
    */
-  registerCommand(name: string, command: KernelCommand): this {
-    const key = name.trim().toLowerCase();
-    if (key) {
-      this.commands.set(key, command);
+  private async snapshotForFetchSession(): Promise<() => Promise<void>> {
+    const ctx = this.ctx;
+    if (!ctx) {
+      return async () => {};
     }
-    return this;
-  }
+    const mainPage = this.page; // ctx.page 且未关闭
+    const mainUrl = mainPage?.url() ?? '';
+    const scrollY = mainPage ? await mainPage.evaluate(() => window.scrollY).catch(() => null) : null;
 
-  /** 注销指令（返回是否存在） */
-  unregisterCommand(name: string): boolean {
-    return this.commands.delete(name.trim().toLowerCase());
-  }
-
-  /** 全部已注册指令名（排序） */
-  listCommands(): string[] {
-    return [...this.commands.keys()].sort();
-  }
-
-  /** 指令帮助文本（help 指令使用；宿主也可直接打印） */
-  getCommandHelp(): string {
-    const lines = [...this.commands.entries()]
-      .sort((a, b) => a[0].localeCompare(b[0]))
-      .map(([name, cmd]) => `  ${(cmd.usage ?? name).padEnd(48)} ${cmd.description}`);
-    return ['可用指令：', ...lines].join('\n');
-  }
-
-  /**
-   * 执行一条指令（指令系统的统一入口，**与通道无关**）。
-   *
-   * 通道可以是：stdin 控制台（attachConsole）/ 宿主代码直接调用 / IPC / HTTP / 定时任务等。
-   * @returns `{ ok, output }`：ok=false 表示未知指令或执行出错，output 是需展示的文本（可空）
-   */
-  async executeCommand(line: string): Promise<KernelCommandResult> {
-    const raw = line.trim();
-    if (!raw) {
-      return { ok: true };
-    }
-    const [name, ...args] = raw.split(/\s+/);
-    const command = this.commands.get(name.toLowerCase());
-    if (!command) {
-      return { ok: false, output: `未知指令: ${name}（输入 help 查看可用指令）` };
-    }
-    const ctx: KernelCommandContext = { kernel: this, raw, args };
-    try {
-      const result = await command.handler(ctx);
-      if (typeof result === 'string') {
-        return { ok: true, output: result };
+    return async (): Promise<void> => {
+      const c = this.ctx;
+      if (!this.initialized || !c) {
+        return;
       }
-      return result ?? { ok: true };
-    } catch (error) {
-      return { ok: false, output: `指令执行失败: ${(error as Error).message}` };
-    }
-  }
-
-  /**
-   * 挂载 stdin 指令控制台：终端里逐行输入指令（如 `sim off`、`fetch on`）即打开 / 关闭功能。
-   *
-   * 返回卸载函数；`shutdown()` 会自动卸载。Ctrl+C 默认只卸载控制台，退出语义由 `onInterrupt` 决定。
-   */
-  attachConsole(options: KernelConsoleOptions = {}): () => void {
-    this.consoleDetach?.(); // 防重复挂载
-    const input = options.input ?? process.stdin;
-    const output = options.output ?? process.stdout;
-    const rl = readline.createInterface({ input, output });
-    const write = (text?: string): void => {
-      if (text) {
-        output.write(text.endsWith('\n') ? text : text + '\n');
+      let page = c.page;
+      // ① 主操作页失效（蹲饼关页重开时可能发生）→ 接回一个可用页，
+      //    否则后续任务会因「页面已关闭」全部前置检查失败而空转
+      if (!page || page.isClosed()) {
+        const browser = c.browser;
+        const open = browser ? (await browser.pages().catch(() => [] as Page[])).filter((p) => !p.isClosed()) : [];
+        page = open[0] ?? (browser ? await browser.newPage().catch(() => null) : null);
+        if (!page) {
+          return;
+        }
+        c.page = page;
+        this.log(`🔧 蹲饼会话结束：主操作页已失效，已接回 ${page.url().slice(0, 60) || '(新标签页)'}`);
+      }
+      // ② 前台切回主操作页（蹲饼期间被切到了动态页）
+      await page.bringToFront().catch(() => {});
+      // ③ URL 未变（未被蹲饼导航走）→ 还原会话前的滚动位置
+      if (scrollY !== null && mainUrl && page.url() === mainUrl) {
+        await page.evaluate((y) => window.scrollTo(0, y), scrollY).catch(() => {});
       }
     };
-
-    rl.on('line', (line) => {
-      void (async () => {
-        const result = await this.executeCommand(line);
-        write(result.output);
-      })();
-    });
-    rl.on('SIGINT', () => {
-      if (options.onInterrupt) {
-        options.onInterrupt();
-      } else {
-        detach();
-      }
-    });
-
-    const detach = (): void => {
-      this.consoleDetach = null;
-      rl.close();
-    };
-    this.consoleDetach = detach;
-    return detach;
   }
 
-  // ===== ⑤ 关闭 =====
+  // ===== ⑥ 销毁 =====
 
-  /** 关闭内核：停止模拟行为与蹲饼 → 关闭浏览器 → 复位状态（可再次 initialize） */
-  async shutdown(): Promise<void> {
-    this.log('👋 内核关闭中…');
-    this.consoleDetach?.(); // 摘除 stdin 指令控制台，避免进程退出时残留监听
+  /**
+   * 销毁内核：停止模拟行为与动态获取 → 关闭浏览器 → 清除初始化信息与订阅。
+   *
+   * 调用后可再次 `initialize()`（等同全新启动）；未初始化时调用为无操作。
+   */
+  async destroy(): Promise<void> {
+    this.log('👋 内核销毁中…');
+    this.dynamicListeners.clear();
+    this.syncDynamicListener();
     await this.stopSimulation().catch(() => {});
-    await this.stopFetch({ closePage: true }).catch(() => {});
+    await this.stopFetch().catch(() => {});
 
     const browser = this.ctx?.browser;
     if (browser && browser.isConnected()) {
@@ -889,6 +925,9 @@ export class SimulationKernel {
       this.fetchWatchdog = null;
     }
 
+    // 清除初始化信息（下次 initialize() 等同全新启动）
+    fetchCoordinator.snapshotSimulationState = null;
+    this.options = {};
     this.ctx = null;
     this.generator = null;
     this.executor = null;
@@ -897,10 +936,36 @@ export class SimulationKernel {
     this.loggedIn = false;
     this.fetchRunning = false;
     this.simulationRunning = false;
-    this.log('✅ 内核已关闭（浏览器已退出）');
+    this.simulationTask = null;
+    this.stopSimulationTask = null;
+    this.stoppingSimulation = false;
+    this.userDataDir = USER_DATA_DIR;
+    this.headless = true;
+    this.control = { stopped: false };
+    this.log('✅ 内核已销毁（浏览器已退出，初始化信息已清除）');
   }
 
   // ===== 内部工具 =====
+
+  /**
+   * （重）建生成器与执行器：应用当前人格与浏览器上下文。
+   * 初始化时调用一次；**运行态换人格不走这里**（走 `generator.setPersona()` 热替换，不重建、不打断任务流）。
+   */
+  private createGeneratorAndExecutor(): void {
+    const ctx = this.ctx!;
+    this.generator = new PersonaDrivenGenerator(this.persona!, {
+      maxTasks: 1_000_000, // 仅防死循环，实际由 stopSimulation / BROWSER_CLOSED 决定
+      sessionDurationMs: Number.MAX_SAFE_INTEGER, // 无时长上限
+      now: () => Date.now(),
+    });
+    this.control = { stopped: false };
+    this.generator.setControl(this.control);
+    this.executor = new TaskExecutor(this.generator, ctx, {
+      verbose: !!this.options.verbose,
+      stopOnError: false,
+      maxTasks: Number.MAX_SAFE_INTEGER, // 与生成器一致：任务流只由「停止模拟 / 浏览器关闭」结束
+    });
+  }
 
   /** 打开浏览器并进入主页（失败按配置重试） */
   private async openBrowser(): Promise<TaskContext> {
@@ -983,7 +1048,17 @@ export class SimulationKernel {
       throw new Error('内核尚未初始化：请先 await kernel.initialize()');
     }
     if (!this.ctx.browser?.isConnected()) {
-      throw new Error('浏览器已断开：请先 await kernel.shutdown() 后重新 initialize()');
+      throw new Error('浏览器已断开：请先 await kernel.destroy() 后重新 initialize()');
+    }
+  }
+
+  /**
+   * 断言已登录：**未登录时无法启用蹲饼 / 模拟**
+   * （登录是最高优先级任务，见 fetch-coordinator 的 EXCLUSIVE_TASKS）。
+   */
+  private assertLoggedIn(action: string): void {
+    if (!this.loggedIn) {
+      throw new Error(`未登录：无法${action}。请先 await kernel.login() 完成扫码登录`);
     }
   }
 

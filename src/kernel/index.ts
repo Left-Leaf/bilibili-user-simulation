@@ -5,22 +5,12 @@
  */
 export { SimulationKernel, kernel } from './kernel.js';
 export type {
+  KernelPersonaSource,
   KernelInitializeOptions,
   KernelFetchOptions,
-  KernelStopFetchOptions,
   KernelFollowUpOptions,
-  KernelStatus,
-  KernelConsoleOptions,
+  DynamicSubscription,
 } from './kernel.js';
-
-// 指令系统（扩展自定义指令时用到的类型与状态文本格式化）
-export { registerBuiltinCommands, formatKernelStatus } from './commands.js';
-export type {
-  KernelCommand,
-  KernelCommandContext,
-  KernelCommandHandler,
-  KernelCommandResult,
-} from './commands.js';
 
 // 人格目录工具（personaId = 文件名）
 export { listPersonas, loadPersona, loadPersonaFromFile, DEFAULT_PERSONA_DIR } from '../persona/loader.js';

@@ -31,6 +31,19 @@ export interface TaskResult {
 export interface TaskController {
   /** 异步进程：仅表示「任务是否结束」（不代表结果） */
   readonly done: Promise<void>;
+  /**
+   * **任务主体是否已真正返回**。
+   * - `true`：主体已收尾（正常结束，或在宽限内完成收尾）；
+   * - `false`：主体**未在宽限内收尾、已被强制结束** —— 主体可能仍在后台操作页面（「僵尸主体」）。
+   *
+   * ⚠️ `done` 只为「执行器能否进入下一个任务」服务，**不代表页面已安全**：
+   * 强断时 `done` 已 resolve 而主体未退出，此时若关页/换主操作页，
+   * 主体的后续操作就会落到错误的页面上。需要动页面的一方（如内核的页面清理）
+   * 必须看 `bodyDone`，而非 `done`。
+   */
+  readonly bodyFinished: boolean;
+  /** 任务主体真正返回的信号（`bodyFinished === true` 时已 resolve） */
+  readonly bodyDone: Promise<void>;
   /** 是否已被中止 */
   readonly aborted: boolean;
   /** 是否处于暂停 */
@@ -134,11 +147,33 @@ export function createSustainedController(options: {
   const done = new Promise<void>((r) => {
     resolveDone = r;
   });
+  // 「主体真正返回」的独立信号：强断只 resolve done，不碰它
+  let resolveBodyDone!: () => void;
+  const bodyDone = new Promise<void>((r) => {
+    resolveBodyDone = r;
+  });
   let paused = false;
   let aborted = false;
   let finished = false;
+  let bodyFinished = false;
 
+  /** 任务主体结束（正常收尾）：同时结束「异步进程」与「主体」 */
   const finish = (): void => {
+    if (!bodyFinished) {
+      bodyFinished = true;
+      resolveBodyDone();
+    }
+    if (!finished) {
+      finished = true;
+      resolveDone();
+    }
+  };
+
+  /**
+   * 强制结束「异步进程」（主体未在宽限内收尾）—— **不**置 `bodyFinished`：
+   * 主体仍在后台跑，页面对它来说仍不安全，需由调用方（页面清理）避让。
+   */
+  const forceFinish = (): void => {
     if (!finished) {
       finished = true;
       resolveDone();
@@ -147,6 +182,10 @@ export function createSustainedController(options: {
 
   return {
     done,
+    bodyDone,
+    get bodyFinished() {
+      return bodyFinished;
+    },
     get aborted() {
       return aborted;
     },
@@ -183,7 +222,14 @@ export function createSustainedController(options: {
       while (!finished && Date.now() < deadline) {
         await wait(50);
       }
-      finish();
+      if (!finished) {
+        // 主体没在宽限内收尾：执行器会把它当「已结束」，但主体的异步进程可能还在后台跑
+        // （实测：蹲饼让位 WatchVideo 时，主体随后在已被换掉的页面上继续执行）→ 显式告警便于定位；
+        // 此时只能强制结束「异步进程」，`bodyFinished` 保持 false，
+        // 让后续的页面清理知道「页面仍被一个主体使用着」（见 fetchCoordinator.waitZombieBodies）。
+        console.warn(`⚠️ 任务主体未在 ${abortGraceMs}ms 宽限内收尾，已强制结束（主体可能仍在后台操作页面）`);
+      }
+      forceFinish();
     },
     async dwell(ms: number): Promise<boolean> {
       let remain = ms;

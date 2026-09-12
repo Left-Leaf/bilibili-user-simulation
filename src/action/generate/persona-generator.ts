@@ -8,7 +8,7 @@ import { buildTransitionMatrix, sampleInitialState, sampleNextState } from '../.
 import { hourOf, willingnessAt } from '../../persona/circadian';
 import type { PersonaConfig } from '../../persona/types';
 import type { VideoEntry, ProfileEntry } from '../../utils/bilibili-dom';
-import { collectVideoEntries, collectProfileEntries, findDynamicEntryHandle, isVideoPageUrl } from '../../utils/bilibili-dom';
+import { collectVideoEntries, collectProfileEntries, findDynamicEntryHandle, isVideoPageUrl, isDynamicPageUrl, isHomePageUrl, isUserPageUrl } from '../../utils/bilibili-dom';
 import { sampleTaskByProbability, type GenerationContext, type PageFeatures, type PageFeatureDetector } from './task-registry';
 import { registerAllTasks } from './task-registrations';
 import { fetchCoordinator } from '../../business/fetch-coordinator';
@@ -52,19 +52,18 @@ export interface Clock {
 }
 
 /**
- * 外部运行时控制（登录失效 / 强制登录 / 热重启）：由正式运行入口注入共享对象。
- * - stopped：停止生成（登录失效，等用户 login）
- * - forceLogin：下一个任务强制为登录任务（Login 概率=1），生成后由生成器清除
- * - forceLogout：下一个任务强制为退出登录任务（Logout 概率=1），生成后由生成器清除
- * - reloadRequested：热重启（重载人格配置），生成器返回 null 结束当前上线任务流，由入口重载后重新上线
+ * 外部运行时控制（仅「停止」）：由内核注入**共享可变对象**——
+ * 内核直接改 `control.stopped`，生成器在 `next()` 里实时读，不需要额外的通知机制。
+ *
+ * - stopped：停止生成（结束当前任务流；内核 `stopSimulation()` 置位）
+ *
+ * 注 1：登录/登出（Login/Logout）**不属于模拟任务流**——它们是内核直接经执行器 `runTask()` 调用的额外任务，
+ * 不在任务注册表里，因此这里没有「强制下一个任务为登录/登出」这类开关。
+ * 注 2：运行态换人格走 `setPersona()` 热替换，**不需要**「结束任务流让入口重载」这类开关。
+ * 注 3：「强制上线」走 `ctx.state.forceOnline`（`kernel.stopOngoingLongRest()` ↔ `rest.ts`），与本控制对象无关。
  */
 export interface GeneratorControl {
   stopped: boolean;
-  forceLogin: boolean;
-  forceLogout?: boolean;
-  reloadRequested?: boolean;
-  /** 强制上线：强制结束当前休息（RestTask）/下线休息倒计时，立即开始上线 */
-  forceOnline?: boolean;
 }
 
 export class PersonaDrivenGenerator implements TaskGenerator {
@@ -133,9 +132,20 @@ export class PersonaDrivenGenerator implements TaskGenerator {
     this.searchCloseBias = 0;
   }
 
-  /** 注入外部运行时控制（登录失效 / 强制登录） */
+  /** 注入外部运行时控制（停止 / 热重启 / 强制上线） */
   setControl(control: GeneratorControl): void {
     this.control = control;
+  }
+
+  /**
+   * 运行态**热替换**人格：立即影响后续决策（重建转移矩阵、circadian、行为概率）。
+   *
+   * 与 `reset()` 不同，它**保持当前所处状态与本次上线进度不变**，也不打断正在执行的任务 ——
+   * 人格只驱动「下一个任务怎么选」，换人格不需要重开会话。
+   */
+  setPersona(persona: PersonaConfig): void {
+    this.persona = persona;
+    this.matrix = buildTransitionMatrix(persona);
   }
 
   /** 返回生成器内部当前模拟时间（供外部推进后查询） */
@@ -194,6 +204,9 @@ export class PersonaDrivenGenerator implements TaskGenerator {
     let hasSearchBox = false;
     let hasDynamicEntry = false;
     let isVideoPage = false;
+    let isDynamicPage = false;
+    let isHomePage = false;
+    let isUserPage = false;
     let hasVideoTab = false;
     let videoTabCount = 0;
     let tabCount = 0;
@@ -202,6 +215,10 @@ export class PersonaDrivenGenerator implements TaskGenerator {
     if (page) {
       // 当前活动页是否为视频页（普通视频或 bangumi 番剧/TV剧）——互动/连刷的目标页前提
       isVideoPage = isVideoPageUrl(page.url());
+      // 当前活动页类型（统一 URL 判定，与各任务的 preCheck 共用同一实现）
+      isDynamicPage = isDynamicPageUrl(page.url());
+      isHomePage = isHomePageUrl(page.url());
+      isUserPage = isUserPageUrl(page.url());
       // 视频入口：当前页有可见视频卡片/推荐流（按页面类型自动定位）
       hasVideoEntry = await collectVideoEntries(page, 1)
         .then((es) => es.length > 0)
@@ -239,6 +256,9 @@ export class PersonaDrivenGenerator implements TaskGenerator {
       hasSearchBox,
       hasDynamicEntry,
       isVideoPage,
+      isDynamicPage,
+      isHomePage,
+      isUserPage,
       hasVideoTab,
       videoTabCount,
       tabCount,
@@ -266,13 +286,13 @@ export class PersonaDrivenGenerator implements TaskGenerator {
   }
 
   async next(context: TaskContext): Promise<Task | null> {
-    // 外部控制：登录失效 → 停止生成（等用户 login 重登）；热重启 → 结束当前上线任务流（由入口重载重新上线）
-    if (this.control?.stopped || this.control?.reloadRequested) {
+    // 外部控制：停止模拟（内核 stopSimulation）→ 不再生成任务
+    if (this.control?.stopped) {
       return null;
     }
     // 生成器暂停（登录前 paused / 被动蹲饼协调 fetchCoordinator.paused）→ 等待解除后再生成任务
     while (this.paused || fetchCoordinator.paused) {
-      if (this.control?.stopped || this.control?.reloadRequested) {
+      if (this.control?.stopped) {
         return null;
       }
       await sleep(200);
@@ -343,14 +363,19 @@ export class PersonaDrivenGenerator implements TaskGenerator {
     const elapsedRatio = Math.min(1, elapsed / this.options.sessionDurationMs);
     const fatigue = elapsedRatio < 0.6 ? 1 : 1 - ((elapsedRatio - 0.6) / 0.4) * 0.5;
 
-    // 采样下一主状态
-    let nextState = sampleNextState(this.matrix, this.currentState);
+    // 采样下一主状态。
+    // ⚠️ 蹲饼开启期间**从分布里剔除 `BROWSER_CLOSED`（下线 / 长休息）**：让长休息**根本不会被生成**，
+    //    而不是「先生成再当场改写」——后者会把该状态的概率质量整体塞给首页（扭曲分布），日志也会误导成「跳过」。
+    //    与 Rest 注册表侧的 `longRestProb = 0`（同一个开关 `longRestDisabled`）保持一致的「决策期置 0」语义。
+    const blockedStates = fetchCoordinator.longRestDisabled ? ([MainState.BROWSER_CLOSED] as const) : undefined;
+    let nextState = sampleNextState(this.matrix, this.currentState, blockedStates);
     // 采到 BROWSER_CLOSED → 是否真正下线由「作息意愿 + 已上线时长」决定（acceptOffline，非固定概率）。
     // 不接受下线 → 重抽（最多 3 次仍命中则回首页继续，避免卡在吸收态）；接受 → 保留 BROWSER_CLOSED，
     // 由下方「生成长休息任务」分支执行下线。
+    // （蹲饼开启时 BROWSER_CLOSED 已在采样期被剔除 → 这里的重抽与 acceptOffline 不会被触发。）
     if (nextState === MainState.BROWSER_CLOSED && !this.acceptOffline()) {
       for (let i = 0; i < 3 && nextState === MainState.BROWSER_CLOSED; i++) {
-        nextState = sampleNextState(this.matrix, this.currentState);
+        nextState = sampleNextState(this.matrix, this.currentState, blockedStates);
       }
       if (nextState === MainState.BROWSER_CLOSED) {
         nextState = MainState.HOME_FEED;
@@ -362,8 +387,8 @@ export class PersonaDrivenGenerator implements TaskGenerator {
     if (lastTaskName === 'OpenVideo' && lastSuccess) {
       nextState = MainState.CONTENT_CONSUMING;
     }
-    // BrowseProfile 未找到入口 → 锁定搜索结果态（Search 必然）
-    if (lastTaskName === 'BrowseProfile' && lastMeta?.needSearch === true) {
+    // OpenProfile 未找到入口 → 锁定搜索结果态（Search 必然）
+    if (lastTaskName === 'OpenProfile' && lastMeta?.needSearch === true) {
       nextState = MainState.SEARCH_RESULT;
     }
     // 重试流程：OpenVideo 前置失败 → 下一步先 CloseVideo（关错误页），回首页态
@@ -411,8 +436,9 @@ export class PersonaDrivenGenerator implements TaskGenerator {
     // 时长恒 > 10min 长休息阈值（沿用 Rest 注册表长休息区间 30~120min）。
     if (nextState === MainState.BROWSER_CLOSED) {
       if (fetchCoordinator.longRestDisabled) {
-        // 蹲饼开启期间禁止长休息（长休息会关浏览器下线，使蹲饼失效）→ 改写为继续浏览
-        console.log('   🥞 蹲饼已开启：跳过「下线（长休息）」，继续浏览');
+        // 兜底：正常路径已在**采样期**剔除 BROWSER_CLOSED，走到这里说明有别的分支把它改成了下线
+        // （采样期剔除后不该出现）→ 告警并改写为继续浏览，避免静默地变成「先生成再跳过」。
+        console.log('   ⚠️ 蹲饼已开启但仍命中下线状态（采样期已剔除，不应发生）→ 继续浏览');
         nextState = MainState.HOME_FEED;
       } else {
         this.currentState = nextState;

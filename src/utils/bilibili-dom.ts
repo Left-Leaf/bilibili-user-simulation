@@ -68,6 +68,43 @@ export function isVideoPageUrl(url: string): boolean {
   return /\/video\/BV\w+/.test(url) || /\/bangumi\/play\/(ep|ss)\d+/.test(url);
 }
 
+/** 是否为 B 站「动态页」（t.bilibili.com） */
+export function isDynamicPageUrl(url: string): boolean {
+  try {
+    const u = new URL(url);
+    return u.hostname === 't.bilibili.com' || u.hostname.endsWith('.t.bilibili.com');
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * 是否为 B 站「主页」（主站根路径 / 或 /index.html）。
+ * 严格限定主站域名（bilibili.com / www.bilibili.com / m.bilibili.com），
+ * 避免把 t.bilibili.com/（动态页）等子站根路径误判为主页。
+ */
+export function isHomePageUrl(url: string): boolean {
+  try {
+    const u = new URL(url);
+    const host = u.hostname;
+    if (host !== 'bilibili.com' && host !== 'www.bilibili.com' && host !== 'm.bilibili.com') {
+      return false;
+    }
+    return u.pathname === '/' || u.pathname === '' || u.pathname === '/index.html';
+  } catch {
+    return false;
+  }
+}
+
+/** 是否为 B 站「用户页」（UP 主页：space.bilibili.com/{uid}） */
+export function isUserPageUrl(url: string): boolean {
+  try {
+    return new URL(url).hostname.includes('space.bilibili.com');
+  } catch {
+    return false;
+  }
+}
+
 /** 入口类型：视频 / 直播 / 其他 */
 export type EntryType = 'video' | 'live' | 'other';
 
@@ -289,6 +326,96 @@ export async function findVideoCoverHandle(page: Page, bvid: string): Promise<El
   }
   return null;
 }
+
+/** 毫秒级等待（本文件的工具都是纯 DOM/CDP 辅助，不引入外部依赖） */
+const waitMs = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * 播放器是否**铺满视口**（B 站「网页全屏」或原生全屏）。
+ *
+ * 判定用「播放器容器铺满视口」而不是 B 站会变的 class 名：铺满时右侧推荐栏虽然还在 DOM 里、
+ * 坐标也能算出来，但被播放器盖住 → 对它点击会**落空**（实测：全屏观看之后的连刷 3/4 失败）。
+ */
+export async function isPlayerFullscreen(page: Page): Promise<boolean> {
+  return page
+    .evaluate(() => {
+      if (document.fullscreenElement) {
+        return true; // 原生全屏（按 f 触发）
+      }
+      const vw = window.innerWidth;
+      const vh = window.innerHeight;
+      // ⚠️ 必须**逐个**判定：实测全屏时 `#bilibili-player` 尺寸不变（1354x818），
+      //    只有 `.bpx-player-container` 铺满视口（1920x1080）——
+      //    用 `querySelector('#bilibili-player, .bpx-player-container, ...')` 只会返回
+      //    文档里第一个匹配的 `#bilibili-player` → 一旦没有 `fullscreenElement`（网页全屏）就会**漏判**。
+      return ['#bilibili-player', '.bpx-player-container', '.bpx-player-primary-area'].some((sel) => {
+        const r = document.querySelector(sel)?.getBoundingClientRect();
+        return !!r && r.width >= vw * 0.95 && r.height >= vh * 0.9;
+      });
+    })
+    .catch(() => false);
+}
+
+/**
+ * 退出播放器全屏；返回是否已退出（本来就不在全屏也返回 true）。
+ *
+ * ⚠️ **绝不能「退完再按 f」**：`f` 是**切换键**，会刚退出又把全屏按回去。
+ * （实测：旧实现每轮「`exitFullscreen()` → 按 f」→ 退出后立刻重新全屏 →
+ *   两轮都复验为全屏 → 返回 false，并把播放器**留在全屏**里；
+ *   随后 OpenVideo 连刷点击落在被盖住的推荐栏上 → 24s 后失败。）
+ *
+ * 正确顺序（实测校准）：
+ * 1. **原生全屏**（`document.fullscreenElement` 有值）→ 只走标准 API `exitFullscreen()`，
+ *    复验已退出就 **立即 return**（不再碰 `f`）；没退掉才进下一轮重试。
+ * 2. **非原生**（网页全屏 / 未知铺满）→ B 站播放器**没有全屏按钮**（实测），只能按 `f`；
+ *    按完必须复验：若被切成了原生全屏，下一轮走 ① 用标准 API 退掉。
+ * 3. **后台标签**（页面已不可见）：Chrome 会在标签失活时自动解除全屏，且此时
+ *    `exitFullscreen()` 会抛 `Document not active`（实测）→ 只需不动即可。
+ */
+export async function exitPlayerFullscreen(page: Page): Promise<boolean> {
+  for (let round = 0; round < 2; round++) {
+    if (!(await isPlayerFullscreen(page))) {
+      return true;
+    }
+    // ① 原生全屏：标准 API 是唯一可靠手段（退成功就结束，**绝不**再按 f）
+    const nativeExited = await page
+      .evaluate(async () => {
+        if (!document.fullscreenElement) {
+          return false;
+        }
+        try {
+          await document.exitFullscreen();
+          return true;
+        } catch {
+          return false; // 如后台页：Document not active
+        }
+      })
+      .catch(() => false);
+    if (nativeExited) {
+      await waitMs(600);
+      if (!(await isPlayerFullscreen(page))) {
+        return true;
+      }
+      continue; // 未退掉（极少见）→ 下一轮重试
+    }
+
+    // ② 非原生（网页全屏 / 未知铺满）：有退出按钮就点，否则按 f（唯一的切换手段）
+    const btn = (await page.$(EXIT_FULLSCREEN_SELECTOR).catch(() => null)) as ElementHandle<Element> | null;
+    if (btn) {
+      await btn.click().catch(() => {});
+    } else {
+      await page.keyboard.press('f').catch(() => {});
+    }
+    await waitMs(600);
+    if (!(await isPlayerFullscreen(page))) {
+      return true;
+    }
+  }
+  return !(await isPlayerFullscreen(page));
+}
+
+/** 「退出全屏」按钮选择器（B 站全屏时同一按钮类名带 -exit 后缀） */
+const EXIT_FULLSCREEN_SELECTOR = '.bpx-player-ctrl-fullscreen-exit, .bpx-player-ctrl-web-fullscreen-exit';
 
 /**
  * 收集目标视频在当前页的**所有跳转链接 <a> href**（供生成器定位阶段封装）。

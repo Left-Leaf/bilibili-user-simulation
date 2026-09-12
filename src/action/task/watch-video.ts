@@ -6,9 +6,11 @@ import { MousePositionManager } from '../engine/mouse-position-manager';
 import { HumanScroller } from '../engine/human-scroller';
 import {
   bvFromUrl,
+  exitPlayerFullscreen,
   extractVideoPageInfo,
   getContinuousPlaybackState,
   getPlayerPlaybackState,
+  isPlayerFullscreen,
   isVideoPageUrl,
 } from '../../utils/bilibili-dom';
 
@@ -168,12 +170,23 @@ export class WatchVideoTask extends BaseTask {
             break;
           }
         }
-        if (Math.random() < 0.3 && !this.input.fullscreen) {
+        if (Math.random() < 0.3 && !this.input.fullscreen && !ctrl.aborted) {
           // 偶尔滚动看简介/评论区（30% 概率）——看完后滚回视频位置继续观看（真人会这么做）
+          // ⚠️ 这一段整体很长（滚动 + 停顿 + 回顶，最坏 ~20s）。必须把中断信号传进去，
+          //    否则蹲饼让位/停止模拟要等它跑完才能收尾 → 超过 8s 中止宽限 → 主体被强制结束
+          //    （实测：主体仍卡在这段里，一条「观看进度」都来不及打）。
           const { mousePos, distance } = await MousePositionManager.instance.browseScrollParams(context.page!);
-          await new ScrollBehavior(mousePos, distance).execute(context);
-          await new SleepBehavior(800 + Math.random() * 2000).execute(context);
-          await new HumanScroller().scrollBackToTop(context.page!).catch(() => {});
+          await new ScrollBehavior(mousePos, distance, undefined, () => ctrl.aborted).execute(context);
+          await ctrl.dwell(800 + Math.random() * 2000);
+          await new HumanScroller().scrollBackToTop(context.page!, () => ctrl.aborted).catch(() => {});
+          if (ctrl.aborted) {
+            this.log('⏹️ 收到中断，结束观看并收尾');
+            this.finishWith({
+              success: true,
+              data: { durationMs: Math.round(Date.now() - watchStart), interrupted: true },
+            });
+            return;
+          }
         }
         // 定期打印观看进度：同步内部状态（已看 = 内部 playedSeconds）/ 计划 / 总时长
         if (i % PROGRESS_EVERY === 0) {
@@ -202,6 +215,19 @@ export class WatchVideoTask extends BaseTask {
     } catch (error) {
       this.finishWith({ success: false, error: `观看视频失败: ${(error as Error).message}`, data: { steps: steps.length } });
     } finally {
+      // 全屏观看结束必须退出全屏：全屏时右侧推荐栏被播放器盖住，
+      // 下一个 OpenVideo 的「连刷」点击会落空（实测：全屏观看后连刷 3/4 失败）。
+      if (this.input.fullscreen) {
+        try {
+          const page = context.page;
+          if (page && !page.isClosed() && (await isPlayerFullscreen(page))) {
+            const ok = await exitPlayerFullscreen(page);
+            this.log(ok ? '🪟 已退出全屏' : '⚠️ 退出全屏失败（右侧推荐栏可能不可点）');
+          }
+        } catch {
+          /* 退出全屏失败不影响任务收尾 */
+        }
+      }
       ctrl.finish(); // 任务主体结束 → 结束异步进程（执行器随后调用 ③ 结束处理）
     }
   }

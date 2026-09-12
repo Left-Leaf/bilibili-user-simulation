@@ -35,7 +35,20 @@ export class HumanScroller {
    * 滚动中停顿细看 + 回滚重看。对应 DESIGN 6.4.2。
    * 所有 wheel 调用带 CDP 超时保护（防响应丢失永久挂起卡死任务）。
    */
-  async humanScroll(page: Page, mousePos: Point, distance: number): Promise<void> {
+  async humanScroll(
+    page: Page,
+    mousePos: Point,
+    distance: number,
+    /**
+     * 中断检查（可选）：返回 true 则立即停止滚动并返回。
+     * 持续性任务（浏览/观看）必须传入 —— 否则这段滚动不可中断（最长 ~20s），
+     * 会让「蹲饼让位 / 停止模拟」的中止宽限超时，主体被强制结束。
+     */
+    shouldStop?: () => boolean
+  ): Promise<void> {
+    if (shouldStop?.()) {
+      return;
+    }
     // 先把鼠标移到传入位置（滚轮触发点，多步插值非瞬移），并同步到管理器（供下次移动作起点）
     await page.mouse.move(mousePos.x, mousePos.y, { steps: 12 }).catch(() => {});
     MousePositionManager.instance.setPosition(mousePos);
@@ -46,7 +59,7 @@ export class HumanScroller {
 
     // 初始爆发（前 40% 距离，多个滚轮事件，间隔短）
     const burstDist = absTotal * 0.4;
-    await this.wheelBurst(page, burstDist * sign);
+    await this.wheelBurst(page, burstDist * sign, shouldStop);
 
     // 惯性衰减：剩余 60% 距离，逐步减小每次滚轮 deltaY
     let remaining = absTotal * 0.6;
@@ -56,6 +69,9 @@ export class HumanScroller {
     // 整体时长上限（CDP 挂起/页面卡死时兜底，避免任务永久卡住）
     const scrollDeadline = Date.now() + 15000;
     while (remaining > minStep && velocity > minStep && Date.now() < scrollDeadline) {
+      if (shouldStop?.()) {
+        return; // 中断：立即收尾（每个循环一个滚轮步，延迟 ≤ 一个 wheel 超时）
+      }
       const deltaY = Math.min(velocity, remaining) * sign;
       await withTimeout(page.mouse.wheel({ deltaY }));
       remaining -= Math.abs(deltaY);
@@ -64,6 +80,9 @@ export class HumanScroller {
 
       // 滚动中可能停下细看
       if (Math.random() < behavior.scrollPauseProb / 60) {
+        if (shouldStop?.()) {
+          return; // 中断：不进入不可中断的停顿
+        }
         const pauseMs = 500 + Math.random() * 3000;
         await sleep(pauseMs);
         velocity *= 1.4; // 重新开始会稍快一些
@@ -96,7 +115,10 @@ export class HumanScroller {
    * 视频页滚动看简介/评论区后，滚回视频位置继续观看）。
    * 同样用真实滚轮事件分步上滚，带中途停顿；到顶（scrollTop≈0）即停。
    */
-  async scrollBackToTop(page: Page): Promise<void> {
+  async scrollBackToTop(page: Page, shouldStop?: () => boolean): Promise<void> {
+    if (shouldStop?.()) {
+      return;
+    }
     const behavior = this.config.behavior;
     // 确保滚轮事件作用在页面主体（而非局部滚动容器）
     await this.ensureWheelOnPage(page);
@@ -107,6 +129,9 @@ export class HumanScroller {
     }
     const deadline = Date.now() + 8000; // 回滚总时长上限（CDP 挂起/页面卡死兜底）
     while (Date.now() < deadline) {
+      if (shouldStop?.()) {
+        return; // 中断：不再回滚（每个循环一个滚轮步，延迟 ≤ 一个 wheel 超时）
+      }
       const top = await page.evaluate(() => document.documentElement.scrollTop || window.scrollY || 0).catch(() => 0);
       if (top < 20) {
         break; // 已回到顶部
@@ -114,6 +139,9 @@ export class HumanScroller {
       // 向上滚动一屏内的量（避免一步回顶的机械感），带 CDP 超时保护
       const deltaY = -Math.min(600, top);
       await withTimeout(page.mouse.wheel({ deltaY }));
+      if (shouldStop?.()) {
+        return; // 中断：不进入不可中断的停顿
+      }
       await sleep(24 + Math.random() * 36);
 
       // 回滚中可能停顿（真人上滚偶尔停一下）
@@ -124,11 +152,14 @@ export class HumanScroller {
     }
   }
 
-  /** 初始爆发滚动：连续真实滚轮事件 */
-  private async wheelBurst(page: Page, totalDeltaY: number): Promise<void> {
+  /** 初始爆发滚动：连续真实滚轮事件（`shouldStop` 命中时立即返回） */
+  private async wheelBurst(page: Page, totalDeltaY: number, shouldStop?: () => boolean): Promise<void> {
     const steps = 6 + Math.floor(Math.random() * 6);
     const per = totalDeltaY / steps;
     for (let i = 0; i < steps; i += 1) {
+      if (shouldStop?.()) {
+        return;
+      }
       await withTimeout(page.mouse.wheel({ deltaY: per }));
       await sleep(20 + Math.random() * 30);
     }

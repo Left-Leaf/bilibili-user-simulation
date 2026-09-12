@@ -1,26 +1,37 @@
 /**
- * bilibili-user-simulation 库入口（模块用法）：主项目 `import` 后调用启动。
+ * bilibili-user-simulation 库入口。
  *
- * 两种用法：
- * 1) example 独立启动：`npm run start:headless` / `start:headed`（入口在 run/）。
- *    以包内 `data/personas` 默认人格运行，动态出口 = 读 `config-app.json5`（外发接口 / 本地文档）。
- * 2) 模块接入（本文件）：`import { runPersonaEngine } from 'bilibili-user-simulation'`，
- *    - 用 `personaFile`（或 `persona` 对象）指明人格配置文件；
- *    - 传 `onDynamics` 注册动态监听，接收模块内部捕获的动态（此时不再自动外发/落盘）。
+ * 推荐用法 = 内核（SimulationKernel）：对外只暴露六类能力——
+ * 生命周期（initialize/destroy）、人格配置（loadPersona/listPersonas）、
+ * 模拟行为（startSimulation/stopSimulation）、动态获取（startFetch/stopFetch）、
+ * 动态监听器（createDynamicListener）、登录（login/logout）。
  *
- * 例：
- *   await runPersonaEngine({
- *     headless: true,
- *     personaFile: '/path/to/my-persona.json',   // 指明人格配置文件
- *     onDynamics: (dynamics, kind) => console.log('捕获动态', kind, dynamics.length),
- *   });
+ * ```ts
+ * import { kernel } from 'bilibili-user-simulation';
+ *
+ * await kernel.initialize({ headless: true, personaId: 'ak-night-worker' });
+ * const sub = kernel.createDynamicListener((items, kind) => {});
+ * await kernel.startFetch();
+ * await kernel.startSimulation();
+ * // ...
+ * sub.cancel();
+ * await kernel.destroy();
+ * ```
+ *
+ * 独立启动见 `run/run-kernel.ts`（`npm run start`）。
  */
 
-// 引擎启动（真实时间无限循环：开浏览器 → 登录 → 动态页 → 任务流 → 离线休息 → 重开）
-export { runPersonaEngine } from '../run/persona-engine.js';
-export type { PersonaRunOptions } from '../run/persona-engine.js';
+// ===== 内核（推荐用法）：全局静态单一实例，统一持有浏览器会话 =====
+export { SimulationKernel, kernel } from './kernel/kernel.js';
+export type {
+  KernelPersonaSource,
+  KernelInitializeOptions,
+  KernelFetchOptions,
+  KernelFollowUpOptions,
+  DynamicSubscription,
+} from './kernel/kernel.js';
 
-// 动态监听（被动蹲饼捕获出口）——模块接入方也可直接 setDynamicListener
+// 动态监听（被动蹲饼捕获出口）
 export { setDynamicListener } from './business/passive-fetch.js';
 export type { DynamicListener, BiliDynamicItem } from './business/passive-fetch.js';
 // 原始动态字段读取辅助（出口数据是 B 站原始 item，这些只负责「便捷读取」，不改数据）
@@ -30,23 +41,6 @@ export { dynId, dynAuthor, dynPubTs, dynPubTimeText, dynText } from './business/
 export { loadPersona, loadPersonaFromFile, listPersonas, DEFAULT_PERSONA_DIR } from './persona/loader.js';
 export type { PersonaEntry } from './persona/loader.js';
 export type { PersonaConfig } from './persona/types.js';
-
-// ===== 内核（推荐用法）：全局静态单一实例，统一管理浏览器会话 + 独立开关两大功能 =====
-// 用法：initialize()（开浏览器并登录）→ startSimulation()/stopSimulation()（模拟行为）
-//       → startFetch()/stopFetch()（被动蹲饼）→ shutdown()
-export { SimulationKernel, kernel } from './kernel/kernel.js';
-export type {
-  KernelInitializeOptions,
-  KernelFetchOptions,
-  KernelStopFetchOptions,
-  KernelFollowUpOptions,
-  KernelStatus,
-  KernelConsoleOptions,
-} from './kernel/kernel.js';
-
-// 指令控制：registerCommand / executeCommand / attachConsole（stdin 通道）
-export type { KernelCommand, KernelCommandContext, KernelCommandHandler, KernelCommandResult } from './kernel/commands.js';
-export { formatKernelStatus } from './kernel/commands.js';
 
 // 蹲饼底层开关（内核已封装；需要直接操作被动蹲饼时可用）
 export { setFetchEnabled, isFetchEnabled } from './business/passive-fetch.js';

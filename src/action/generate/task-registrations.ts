@@ -1,8 +1,11 @@
 import { registerTask, type GenerationContext } from './task-registry';
 import { MainState } from '../engine/state';
 import { BrowseHomeTask } from '../task/browse-home';
+import { OpenHomeTask } from '../task/open-home';
 import { BrowseDynamicTask } from '../task/browse-dynamic';
+import { OpenDynamicTask } from '../task/open-dynamic';
 import { BrowseProfileTask } from '../task/browse-profile';
+import { OpenProfileTask } from '../task/open-profile';
 import { SearchTask } from '../task/search';
 import { DirectSearchDecider } from '../task/search-decider';
 import { OpenVideoTask } from '../task/open-video';
@@ -15,8 +18,6 @@ import { FollowTask } from '../task/follow';
 import { CloseVideoTask } from '../task/close-video';
 import { RestTask } from '../task/rest';
 import { fetchCoordinator } from '../../business/fetch-coordinator';
-import { LoginTask } from '../task/login';
-import { LogoutTask } from '../task/logout';
 import { restProbability, onlineMinutesAt } from '../../sim/rest-decision';
 import { inSleep, willingnessAt, hourOf } from '../../persona/circadian';
 
@@ -47,11 +48,11 @@ const behaviorProb =
 const inState = (ctx: GenerationContext, ...states: MainState[]): number => (states.includes(ctx.currentState) ? 1 : 0);
 
 /**
- * BrowseProfile 目标抉择 + 概率（同 OpenVideo：先统计入口 → 抉择目标 → 算概率）：
+ * OpenProfile 目标抉择 + 概率（同 OpenVideo：先统计入口 → 抉择目标 → 算概率）：
  * - 目标：所有用户入口等概率竞争（随机选一个）；
  * - 概率：无目标 → 0；有目标按状态基础（USER_PROFILE 主导、SEARCH 次之、其它低概率）。
  */
-function decideBrowseProfile(ctx: GenerationContext): { target: ProfileEntry | null; probability: number } {
+function decideOpenProfile(ctx: GenerationContext): { target: ProfileEntry | null; probability: number } {
   const entries = ctx.pageFeatures?.profileEntries ?? [];
   // 目标抉择：所有用户入口等概率竞争（随机选一个）
   const target = entries.length > 0 ? entries[Math.floor(Math.random() * entries.length)] : null;
@@ -70,78 +71,99 @@ function decideBrowseProfile(ctx: GenerationContext): { target: ProfileEntry | n
 }
 
 /**
- * 注册全部任务。
+ * 注册全部任务（**仅模拟任务流**）。
  * 每个任务概率函数的思路：
  * - 流程性任务（OpenVideo→WatchVideo、needSearch→Search、离开视频→CloseVideo）条件满足时概率=1（必然）；
  * - 普通任务按当前状态 + persona 参数给基础概率，再乘各种调制。
+ *
+ * 注意：登录/登出（Login/Logout）**不在本注册表内**——它们是内核直接经执行器 `runTask()` 调用的
+ * 额外任务（最高优先级，见 fetch-coordinator 的 EXCLUSIVE_TASKS），**不走模拟循环**，
+ * 不参与生成器的概率采样。
  */
 export function registerAllTasks(): void {
-  // ===== 登录（运行时 login 指令 / 登录失效重登时强制）=====
-  // 仅在 ctx.forceLogin 时为必然（概率=1），否则不参与正常任务流（概率=0）。
-  // userDataDir/headless 由 LoginTask.execute 从 context.state 读取（bilibili-user-simulation 注入）。
-  registerTask({
-    name: 'Login',
-    probability: (ctx) => (ctx.forceLogin ? 1 : 0),
-    create: () => new LoginTask(),
-  });
-
-  // ===== 退出登录（运行时 logout 指令触发）=====
-  // 仅在 ctx.forceLogout 时为必然（概率=1），否则不参与正常任务流（概率=0）。
-  registerTask({
-    name: 'Logout',
-    probability: (ctx) => (ctx.forceLogout ? 1 : 0),
-    create: () => new LogoutTask(),
-  });
-
   // ===== 浏览类 =====
   // 非必然任务：概率 <1（占主导但不等于 1）
+  // 打开主页（触发式）：状态期望在首页 且 当前页不是首页 → 回到首页
   registerTask({
-    name: 'BrowseHome',
-    probability: (ctx) => inState(ctx, MainState.HOME_FEED, MainState.LOGGED_IN) * 0.9,
-    create: (ctx) => new BrowseHomeTask({ browseDepth: Math.ceil(sampleRange([1, 3])) }),
+    name: 'OpenHome',
+    probability: (ctx) => {
+      if (!inState(ctx, MainState.HOME_FEED, MainState.LOGGED_IN)) {
+        return 0;
+      }
+      // 已在主页 → 「回到首页」已完成，交给 BrowseHome 浏览
+      return ctx.pageFeatures?.isHomePage ? 0 : 0.9;
+    },
+    create: () => new OpenHomeTask(),
   });
 
+  // 浏览主页（持续性）：当前页必须是主页（与 BrowseHomeTask.preCheck 一致）
   registerTask({
-    name: 'BrowseDynamic',
+    name: 'BrowseHome',
+    probability: (ctx) => (ctx.pageFeatures?.isHomePage ? 0.9 : 0),
+    create: () => new BrowseHomeTask({ browseDepth: Math.ceil(sampleRange([1, 3])) }),
+  });
+
+  // 打开动态页（触发式）：当前页非动态页且有动态入口 → 偶尔进动态（真人以浏览为主）
+  registerTask({
+    name: 'OpenDynamic',
     probability: (ctx) => {
       // 统一入口 gate：当前页面必须有动态入口，才有概率进动态页（无论状态）
       if (!ctx.pageFeatures?.hasDynamicEntry) {
         return 0;
       }
-      // 有动态入口时的真人概率：已在动态页浏览主导；其它页偶尔进动态
-      return ctx.currentState === MainState.DYNAMIC_FEED ? 0.9 : 0.15;
+      // 已在动态页 → 「进入」已完成，交给 BrowseDynamic 浏览
+      if (ctx.pageFeatures?.isDynamicPage) {
+        return 0;
+      }
+      return 0.15;
     },
-    create: (ctx) => new BrowseDynamicTask({ browseDepth: 1 }),
+    create: () => new OpenDynamicTask(),
   });
 
-  /** BrowseProfile 目标抉择状态：probability 阶段抉择目标，create 阶段消费后清空 */
-  const browseProfileDecision: { target: ProfileEntry | null } = { target: null };
-
+  // 浏览动态页（持续性）：当前页必须是动态页（页面前提，与 BrowseDynamicTask.preCheck 一致）
   registerTask({
-    name: 'BrowseProfile',
+    name: 'BrowseDynamic',
+    probability: (ctx) => (ctx.pageFeatures?.isDynamicPage ? 0.9 : 0),
+    create: () => new BrowseDynamicTask({ browseDepth: 1 }),
+  });
+
+  /** OpenProfile 目标抉择状态：probability 阶段抉择目标，create 阶段消费后清空 */
+  const openProfileDecision: { target: ProfileEntry | null } = { target: null };
+
+  // 打开用户页（触发式）：当前页有目标 UP 入口 → 进 UP 主页
+  // （不在 gate 里排除「已在用户页」：用户页之间可以互相跳转，是否已是目标页交给 preCheck 判定）
+  registerTask({
+    name: 'OpenProfile',
     probability: (ctx) => {
-      const d = decideBrowseProfile(ctx);
-      browseProfileDecision.target = d.target;
+      const d = decideOpenProfile(ctx);
+      openProfileDecision.target = d.target;
       return d.probability;
     },
     create: () => {
-      const target = browseProfileDecision.target;
-      browseProfileDecision.target = null;
+      const target = openProfileDecision.target;
+      openProfileDecision.target = null;
       if (!target) {
         // 概率=0 理论上不会被选；兜底避免 create 返回异常
-        return new BrowseProfileTask({ upName: '明日方舟', browseDepth: 1 });
+        return new OpenProfileTask({ upName: '明日方舟' });
       }
-      return new BrowseProfileTask({ upName: target.name, uid: target.uid, browseDepth: 1 });
+      return new OpenProfileTask({ upName: target.name, uid: target.uid });
     },
   });
 
+  // 浏览用户页（持续性）：当前页必须是用户页（与 BrowseProfileTask.preCheck 一致）
+  registerTask({
+    name: 'BrowseProfile',
+    probability: (ctx) => (ctx.pageFeatures?.isUserPage ? 0.9 : 0),
+    create: () => new BrowseProfileTask({ browseDepth: 1 }),
+  });
+
   // ===== 搜索类 =====
-  // 流程性：BrowseProfile 返回 needSearch → Search 必然（概率=1）；否则仅 SEARCH_RESULT 态可选
+  // 流程性：OpenProfile 返回 needSearch → Search 必然（概率=1）；否则仅 SEARCH_RESULT 态可选
   registerTask({
     name: 'Search',
     probability: (ctx) => {
-      // 必然：逛 UP 主页找不到入口 → 搜索跟进
-      if (ctx.lastTaskName === 'BrowseProfile' && ctx.needSearch === true) {
+      // 必然：进 UP 主页找不到入口 → 搜索跟进
+      if (ctx.lastTaskName === 'OpenProfile' && ctx.needSearch === true) {
         return 1;
       }
       // 统一入口 gate：当前页面必须有搜索框，才有概率搜索（无论状态）

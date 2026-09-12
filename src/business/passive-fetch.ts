@@ -10,25 +10,26 @@
  * - 输出为 B 站接口 `data.items[]` 的**原始动态对象**（未裁剪/未改名），内含 UP 信息
  *   （`modules.module_author`：UP 的 uid / 名称 / 头像，见 `dynAuthor()`）；
  * - **筛选（按 UP / 关键词 / 类型…）完全由外部调用方决定**，蹲饼只保证「原始 + 含 UP 信息」；
- * - 配置了外发接口（`setFetchReportConfig` 且 enable=true）→ 每次拦截到一批就 POST 给外部项目；
- * - 未配置外发接口 → 提炼基本信息（作者/时间/文案）追加写入本地文档 `logs/fetched-dynamics.md`；
- * - 模块接入方可用 `setDynamicListener()` / `onDynamics` 直接接收原始数组，自行筛选。
- * 内存 `collected` 仅作运行期观察（status 展示）。
+ * - 出口 = 注册的动态监听回调（`setDynamicListener()` / 内核 `createDynamicListener()`）。
+ *
+ * 增量范围（**基线 = 启动参数，不落盘**）：保证「基线之后的动态不缺失」——
+ * - 宿主在 `startFetch({ baselineTs })` 传入基线（秒时间戳）；缺省 = 当前时间（= 只投递开启之后新产生的动态）；
+ * - **pubTs 严格晚于基线** 且没见过的动态都会被投递；
+ * - 单次响应只返回一页（约 20 条），若本批**没翻过基线**（全在基线之后）说明中间还有未加载的 → 
+ *   **强制滚动补全**直到翻过基线或滚动到底；
+ * - 滚动到底仍未到达基线 → 本次补全**失败**，基线重置为「本次已获取的最新」（该缺口已超出动态页可加载范围）。
  *
  * 使用（bilibili-user-simulation 集成）：
  * - 每轮浏览器打开后调用一次 `ensureDynamicPage(ctx)`：打开/复用动态页并挂监听；
- * - 周期调用 `ensureDynamicPage(ctx)`（后台监视器）保持「始终存在」；
- * - 启动时 `setFetchReportConfig({ enable, url, batchSize })` 注册外发接口。
+ * - 周期调用 `ensureDynamicPage(ctx)`（后台监视器）保持「始终存在」。
  */
-import fs from 'node:fs';
-import path from 'node:path';
 import type { Browser, Page, ElementHandle, HTTPResponse } from 'puppeteer-core';
 import type { TaskContext } from '../action/execute/context';
-import { fetchCoordinator, TRIGGER_TASKS, SUSTAINED_TASKS } from './fetch-coordinator';
-import { startFetchRecording, stopFetchRecording, type FetchRecording } from './record-fetch-video';
+import { EXCLUSIVE_TASKS, fetchCoordinator, SUSTAINED_TASKS, TRIGGER_TASKS } from './fetch-coordinator';
+import { isDynamicPageUrl } from '../utils/bilibili-dom';
 import { HumanMouse } from '../action/engine/human-mouse';
+import { HumanScroller } from '../action/engine/human-scroller';
 import { installPageRuntimeShim } from '../utils/page-runtime';
-import { packagePath } from '../utils/paths';
 
 /**
  * B 站动态流接口返回的**单条动态**（原样，字段与接口一致，不做任何裁剪/改名）。
@@ -138,119 +139,33 @@ export function dynText(item: BiliDynamicItem | null | undefined, maxLen = 200):
 /** 动态流接口前缀（初始 feed/all 与轮询 feed/all/update 共用） */
 const FEED_API_PREFIX = 'https://api.bilibili.com/x/polymer/web-dynamic/v1/feed/all';
 
-/** 外发接口配置：拦截到的动态 POST 给外部项目处理 */
-export interface FetchReportConfig {
-  /** 是否启用外发 */
-  enable: boolean;
-  /** 外部接口地址（POST JSON；请求体见 deliverToExternal） */
-  url: string;
-  /** 单次请求最多条数（超过则分拆多个请求发送），默认 50 */
-  batchSize: number;
-}
-
-/** 当前外发配置（默认关闭） */
-let reportConfig: FetchReportConfig = { enable: false, url: '', batchSize: 50 };
-
 /**
  * 动态监听回调：主项目以「模块」方式接入时注册，模块内部每次捕获到一批动态即回调。
  *
  * `items` 为**B 站原始动态对象数组**（与接口 `data.items[]` 一致，未做裁剪、**未做任何筛选**）：
  * 一次回调可能包含**任意多个关注 UP** 的动态（包含系统类账号），筛选（只关心某些 UP 等）由监听方自行处理。
  * UP 信息在 `item.modules.module_author`（可用 `dynAuthor(item)` 取 `{ uid, name }`）。
- * kind: 'INIT' 初始加载 / 'UPDATE' 轮询更新。注册后动态交给监听器（不再自动外发/落盘）。
+ *
+ * `kind` 的含义 = **本次 `startFetch` 以来的第几批**：
+ * - `'INIT'`：本次 `startFetch` 的**首次投递**（只有一次）；
+ * - `'UPDATE'`：其余全部（点击获取 / 刷新 / 滚动补全 / 重开页拉回的增量）。
+ *
+ * ⚠️ 两种 kind 都是**增量**（只含 `baselineTs` 之后、且没投递过的动态），
+ * 不是「全量快照」；宿主应当**追加**，不要按 `'INIT'` 重建列表。
  */
 export type DynamicListener = (items: BiliDynamicItem[], kind: 'INIT' | 'UPDATE') => void;
 
 let dynamicListener: DynamicListener | null = null;
 
-/** 注册动态监听（模块接入方在启动引擎前调用）；传 null 取消，回到内置外发/落盘出口 */
+/**
+ * 本次 `startFetch` 以来是否已投递过（决定 `kind`：首次投递 = `'INIT'`，其余 = `'UPDATE'`）。
+ * 每次 `setFetchBaseline()`（= 内核 `startFetch`）重置。
+ */
+let deliveredSinceStart = false;
+
+/** 注册动态监听（模块接入方在启动引擎前调用）；传 null 取消 */
 export function setDynamicListener(listener: DynamicListener | null): void {
   dynamicListener = listener;
-}
-
-/** 未配置外发接口时动态落盘的本地文档（logs/ 已被 .gitignore 忽略，不会上传） */
-const LOCAL_DOC_PATH = packagePath('logs', 'fetched-dynamics.md');
-
-/** 注册外发接口配置（bilibili-user-simulation / watch-persona 启动时从 config-app.json5 读取后调用） */
-export function setFetchReportConfig(cfg: FetchReportConfig): void {
-  reportConfig = {
-    enable: cfg.enable === true && !!cfg.url,
-    url: cfg.url ?? '',
-    batchSize: Number.isFinite(cfg.batchSize) && cfg.batchSize > 0 ? Math.floor(cfg.batchSize) : 50,
-  };
-  if (reportConfig.enable) {
-    logDyn(`📤 接口配置：启用 | url=${reportConfig.url} | batch_size=${reportConfig.batchSize} | 数据出口=POST 外部项目`);
-  } else {
-    logDyn(`📄 接口配置：未启用（未配置 fetch_report）| 数据出口=写入本地文档 ${LOCAL_DOC_PATH}`);
-  }
-}
-
-/**
- * 把拦截到的一批动态 POST 到外部接口（外部项目处理）。
- * 请求体：
- * { source: 'bilibili_dynamic', kind: 'INIT'|'UPDATE', captured_at: 毫秒, count, items: BiliDynamicItem[] }
- * 其中 `items` 为 **B 站原始动态对象**（与接口 data.items[] 一致）。
- */
-async function deliverToExternal(items: BiliDynamicItem[], kind: 'INIT' | 'UPDATE'): Promise<void> {
-  if (!reportConfig.enable || !reportConfig.url || items.length === 0) {
-    return;
-  }
-  const url = reportConfig.url;
-  // 分拆：单次请求不超过 batchSize 条（items 原样透传）
-  const batches: BiliDynamicItem[][] = [];
-  for (let i = 0; i < items.length; i += reportConfig.batchSize) {
-    batches.push(items.slice(i, i + reportConfig.batchSize));
-  }
-  for (const batch of batches) {
-    const body = {
-      source: 'bilibili_dynamic',
-      kind,
-      captured_at: Date.now(),
-      count: batch.length,
-      items: batch,
-    };
-    try {
-      const resp = await fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-      });
-      if (!resp.ok) {
-        warnDyn(`📤 外发失败: HTTP ${resp.status}（${url}）`);
-      } else {
-        logDyn(`📤 已外发 ${batch.length} 条动态 → ${url}（${kind}）`);
-      }
-    } catch (err) {
-      warnDyn(`📤 外发失败: ${(err as Error).message}（${url}）`);
-    }
-  }
-}
-
-/** 提炼动态基本信息（作者/时间/文案）追加写入本地文档（未配置外发接口时的兜底出口） */
-function appendDynamicsToLocalDoc(items: BiliDynamicItem[], kind: 'INIT' | 'UPDATE'): void {
-  try {
-    const lines: string[] = [];
-    const now = new Date().toLocaleString('zh-CN', { hour12: false });
-    lines.push(`\n## ${now}｜${kind === 'INIT' ? '初始加载' : '轮询更新'}｜${items.length} 条`);
-    for (const item of items) {
-      const { uid, name } = dynAuthor(item);
-      const ts = dynPubTs(item);
-      // 时间：优先绝对时间戳（pub_ts）；缺失才退回接口的相对文本（pub_time，如「18分钟前」）
-      const time = ts > 0 ? formatAbsTime(ts) : dynPubTimeText(item) || '（未知）';
-      lines.push(`- 作者：${name || uid || '匿名'}`);
-      lines.push(`  时间：${time}`);
-      lines.push(`  内容：${dynText(item) || '（无文案）'}`);
-      lines.push('');
-    }
-    fs.mkdirSync(path.dirname(LOCAL_DOC_PATH), { recursive: true });
-    // 顶部写入：新抓到的动态放在文档最前面（最新在最上），旧内容顺延到下方
-    const newBlock = lines.join('\n').trimStart();
-    const existing = fs.existsSync(LOCAL_DOC_PATH) ? fs.readFileSync(LOCAL_DOC_PATH, 'utf-8').trimStart() : '';
-    fs.writeFileSync(LOCAL_DOC_PATH, existing ? `${newBlock}\n\n${existing}` : newBlock, 'utf-8');
-    logDyn(`📄 动态已写入本地文档 ${LOCAL_DOC_PATH}`);
-  } catch (err) {
-    warnDyn(`📄 写入本地文档失败: ${(err as Error).message}`);
-  }
 }
 
 /** 数据出口统一入口 + 蹲饼信息打印：每次蹲到动态都打印作者/时间/内容（控制台与日志文件双写） */
@@ -262,7 +177,7 @@ function deliverDynamics(items: BiliDynamicItem[], kind: 'INIT' | 'UPDATE'): voi
     sessionDelivered = true; // 本次蹲饼获取期间取到新动态（供「刷新后仍未取到」的二次尝试判断）
   }
   // 蹲饼信息：本次蹲到的动态摘要（仅日志展示；出口数据为 B 站原始 item）
-  logDyn(`🥞 蹲到动态 ${items.length} 条（${kind === 'INIT' ? '初始加载' : '轮询更新'}）`);
+  logDyn(`🥞 蹲到新动态 ${items.length} 条（${kind === 'INIT' ? '首屏' : '增量'}）`);
   for (const item of items.slice(0, 10)) {
     const { uid, name } = dynAuthor(item);
     const ts = dynPubTs(item);
@@ -272,32 +187,64 @@ function deliverDynamics(items: BiliDynamicItem[], kind: 'INIT' | 'UPDATE'): voi
   if (items.length > 10) {
     console.log(`   … 其余 ${items.length - 10} 条省略`);
   }
-  // 数据出口：
-  // - 模块接入方注册了动态监听（setDynamicListener / 引擎 onDynamics）→ 交给监听器（外发/落盘由主项目决定）
-  // - 否则（example 独立运行）：配置了外发接口 → POST 外部项目；未配置 → 提炼基本信息写本地文档
-  if (dynamicListener) {
-    dynamicListener(items, kind);
-    return;
+  // 数据出口：交给注册的动态监听器（setDynamicListener / 内核 createDynamicListener）
+  dynamicListener?.(items, kind);
+}
+
+/** 已见过的动态 id（**进程内去重**用；不保存原始数据）——判断「是否新增」的唯一依据 */
+const seenIds = new Set<string>();
+/** 已见 id 的插入顺序（配合 seenIds 做容量上限的先进先出淘汰，避免集合无限增长） */
+const seenOrder: string[] = [];
+const MAX_SEEN = 2000;
+
+/** 登记「已见过的动态 id」（初始加载与每次投递后都要登记） */
+function remember(items: BiliDynamicItem[]): void {
+  for (const item of items) {
+    const id = dynId(item);
+    if (id && !seenIds.has(id)) {
+      seenIds.add(id);
+      seenOrder.push(id);
+    }
   }
-  if (reportConfig.enable) {
-    void deliverToExternal(items, kind);
-  } else {
-    appendDynamicsToLocalDoc(items, kind);
+  while (seenOrder.length > MAX_SEEN) {
+    const oldest = seenOrder.shift();
+    if (oldest !== undefined) {
+      seenIds.delete(oldest);
+    }
   }
 }
 
-/** 已收集的动态（内存存储，进程内有效；展示时倒序 = 最新在前） */
-const collected: BiliDynamicItem[] = [];
-const MAX_COLLECTED = 1000;
+/**
+ * 记录一批响应里的两个关键信息：
+ * - 全局最新时间戳（`newestFetchedPubTs`）：补全失败时把基线重置为它；
+ * - 当前已加载列表里**最旧**的那条（`bottomLoadedId` / `bottomLoadedPubTs`）：滚动补全用它判断
+ *   「这一滚有没有加载出更旧的内容」（没变 = 到底了）。
+ */
+function trackBatch(dynamics: BiliDynamicItem[]): void {
+  for (const item of dynamics) {
+    const ts = dynPubTs(item);
+    if (ts <= 0) {
+      continue;
+    }
+    if (ts > newestFetchedPubTs) {
+      newestFetchedPubTs = ts;
+    }
+    const id = dynId(item);
+    if (id && ts < bottomLoadedPubTs) {
+      bottomLoadedPubTs = ts;
+      bottomLoadedId = id;
+    }
+  }
+}
 
 /** 已挂监听的页面（幂等，防重复挂载；页面销毁后由 WeakSet 自动回收） */
 const attached = new WeakSet<object>();
 
 /**
  * 蹲饼总开关（供内核独立开关「蹲饼」功能）。
- * - true（默认）：监听器正常解析 / 投递动态 / 触发补全与点击获取；
- * - false：监听器保留但直接返回，不再解析/投递/触发（页面与增量基线保持不变，
- *   重新开启后继续用同一基线做增量，不会把关闭期间的历史动态误判为新动态重复投递）。
+ * - true（默认）：监听器正常解析 / 投递新增动态 / 触发点击获取；
+ * - false：监听器保留但直接返回，不再解析/投递/触发（页面与已见集合保持不变，
+ *   重新开启后从「没见过的动态」继续，不会重复投递已经投递过的动态）。
  */
 let fetchEnabled = true;
 
@@ -316,62 +263,65 @@ export function isFetchEnabled(): boolean {
 }
 
 /**
- * 上次已获取最新动态（统一的增量基线，持久化单个值跨重启，永不膨胀）。
- * 记录 dynId + pubTs（发布时间）：
- * - dynId 用于精确匹配（基线未删除时）
- * - pubTs 用于「越界式」判断（基线被删除时，靠时间判断是否已翻过基线）：
- *   每次获取新动态一直加载（滚动补全）到「出现不晚于基线发布时间」的批次为止，
- *   基线之后（更新）的是真正新增，基线及之前（更旧）的是已抓过的不重复写。
+ * 增量基线（秒时间戳）：**pubTs 严格晚于它的动态都必须获取并投递**（保证不缺失）。
+ * 由宿主在 `kernel.startFetch({ baselineTs })` 传入（缺省 = 当前时间 = 只投递开启之后新产生的动态）；
+ * **不落盘**——宿主自行持久化（可取已收到动态 `pub_ts` 的最大值，或 `stopFetch()` 的返回值）。
+ *
+ * 基线只在「确认已覆盖」时前进（某批响应里出现了不晚于基线的动态 → 说明基线之后的都已拿到），
+ * 因此滚动补全过程中目标恒定、不会自我漂移。
  */
-const LAST_FETCHED_PATH = packagePath('data', 'last-fetched-dynamic.json');
+let baselinePubTs = 0;
 
-/** 读取上次已获取最新动态（文件不存在/解析失败返回空基线） */
-function loadLastFetched(): { dynId: string; pubTs: number } {
-  try {
-    const raw = fs.readFileSync(LAST_FETCHED_PATH, 'utf-8');
-    const parsed = JSON.parse(raw) as { dynId?: unknown; pubTs?: unknown };
-    return {
-      dynId: typeof parsed.dynId === 'string' ? parsed.dynId : '',
-      pubTs: typeof parsed.pubTs === 'number' && Number.isFinite(parsed.pubTs) ? parsed.pubTs : 0,
-    };
-  } catch {
-    return { dynId: '', pubTs: 0 };
-  }
-}
+/** 本次运行已获取到的最新动态时间戳（补全失败时把基线重置为它） */
+let newestFetchedPubTs = 0;
 
-/** 保存上次已获取最新动态 */
-function saveLastFetched(dynId: string, pubTs: number): void {
-  try {
-    fs.mkdirSync(path.dirname(LAST_FETCHED_PATH), { recursive: true });
-    fs.writeFileSync(LAST_FETCHED_PATH, JSON.stringify({ dynId, pubTs, at: Date.now() }), 'utf-8');
-  } catch {
-    /* 忽略 */
-  }
-}
+/** 当前已加载列表里最旧的那条（id + pubTs）：滚动补全用它判断「还能不能加载出更旧的内容」 */
+let bottomLoadedId = '';
+let bottomLoadedPubTs = Number.MAX_SAFE_INTEGER;
 
-/** 上次已获取最新动态（增量基线） */
-const lastFetched = loadLastFetched();
-let lastFetchedDynId = lastFetched.dynId;
-let lastFetchedPubTs = lastFetched.pubTs;
-/** 本次增量获取的全局最新（第一页最新），滚动补全完成后提交为基线 */
-let sessionLatest: { dynId: string; pubTs: number } | null = null;
-/** 本次滚动补全要追的旧基线发布时间（触发补全时固定，防止补全过程中基线变化） */
-let catchUpBoundaryPubTs = 0;
-
-/** 增量补全状态：idle=无补全；catching-up=正在滚动加载剩余新动态（直到越过已获取基线） */
+/** 滚动补全状态：idle=无补全；catching-up=正在强制滚动补全到基线 */
 let syncState: 'idle' | 'catching-up' = 'idle';
-/** 滚动补全最大段数（防死循环） */
-const MAX_CATCHUP_SCROLL = 50;
+/**
+ * 滚动补全函数是否还在运行（**比 syncState 更严格**）。
+ * `syncState` 是「监听器翻过基线」那一刻就置 idle 的目标标志，但滚动循环要等本轮 sleep/滚轮
+ * 结束后才在下一轮开头退出，`startCatchUpScroll` 还要做模拟状态恢复 + resume——
+ * 所以「是否真正让出页面」必须以本标志为准，否则会「补全还在滚，模拟已经开始了」。
+ */
+let catchUpRunning = false;
+/** 最近一次补全是否失败（滚动到底/滚动无效/超时/被中止 = 未到达基线） */
+let catchUpFailed = false;
 
-/** 是否动态页 URL（t.bilibili.com） */
-export function isDynamicPageUrl(url: string): boolean {
-  try {
-    const u = new URL(url);
-    return u.hostname === 't.bilibili.com' || u.hostname.endsWith('.t.bilibili.com');
-  } catch {
-    return false;
-  }
+/** 滚动补全兜底时间上限（正常靠「已到底/已翻过基线」终止；时间跨度长时允许它一直往前拉） */
+const CATCHUP_MAX_MS = 15 * 60_000;
+/** 每段滚动后等页面加载下一页的时间 */
+const CATCHUP_STEP_WAIT_MS = 1200;
+/** 连续多少段「没加载出新内容且已在文档底部」判定为已滚动到底 */
+const CATCHUP_BOTTOM_ROUNDS = 2;
+/** 连续多少段「滚动位置完全没变化」判定为滚动无法生效 */
+const CATCHUP_STUCK_ROUNDS = 3;
+
+/**
+ * 设置本次蹲饼的增量基线（内核 `startFetch` 调用；不传/非法 = 当前时间）。
+ * 基线时间之后的动态都会被获取并投递（单批不够时会强制滚动补全）。
+ */
+export function setFetchBaseline(baselineTs?: number): void {
+  const ts = toSecTimestamp(baselineTs);
+  baselinePubTs = ts > 0 ? ts : Math.floor(Date.now() / 1000);
+  newestFetchedPubTs = baselinePubTs;
+  bottomLoadedId = '';
+  bottomLoadedPubTs = Number.MAX_SAFE_INTEGER;
+  catchUpFailed = false;
+  deliveredSinceStart = false; // 新的蹲饼周期：下一次投递重新算作首屏（kind = 'INIT'）
+  logDyn(`🥞 蹲饼基线：${formatAbsTime(baselinePubTs)}（之后的动态都会获取并投递）`);
 }
+
+/** 当前基线（秒时间戳；0 = 尚未设置）。宿主可持久化并在下次 `startFetch({ baselineTs })` 传回 */
+export function getFetchBaseline(): number {
+  return baselinePubTs;
+}
+
+/** 动态页 URL 判定（统一实现在 `utils/bilibili-dom`，此处 re-export 保持既有导入路径可用） */
+export { isDynamicPageUrl };
 
 /** 在浏览器现有标签页中找动态页（可排除某页，如当前活动页） */
 export async function findDynamicPage(browser: Browser, exclude?: Page): Promise<Page | null> {
@@ -397,23 +347,6 @@ function toSecTimestamp(v: unknown): number {
 
 /** 秒时间戳 → 本地绝对时间文本（如 2026/8/11 12:09:42） */
 const formatAbsTime = (sec: number): string => new Date(sec * 1000).toLocaleString('zh-CN', { hour12: false });
-
-/**
- * 取本批**最新**的一条（pubTs 最大）——增量基线必须是最新那条，不依赖列表排列方向。
- * 兜底：pubTs 全部缺失时退回到列表第一条（B 站 feed/all 实际为从新到旧、第一条即最新）。
- */
-function latestOf(dynamics: BiliDynamicItem[]): BiliDynamicItem | undefined {
-  if (dynamics.length === 0) {
-    return undefined;
-  }
-  let latest = dynamics[0];
-  for (const d of dynamics) {
-    if (dynPubTs(d) > dynPubTs(latest)) {
-      latest = d;
-    }
-  }
-  return latest;
-}
 
 /**
  * 从动态流接口响应 JSON 中提取**原始动态列表**（与接口 `data.items[]` 一致，原样透传，
@@ -458,7 +391,7 @@ const warnDyn = (...args: unknown[]): void => {
  * update 接口只提示「有 N 条新动态」（update_num>0），不返回数据；
  * 需点击页面上的「有新动态，点击查看」按钮，触发动态流重新加载才能真正获取。
  * 这里：等按钮出现 → **真实鼠标点击**（B 站按钮需真实鼠标事件，JS click 无效）→
- * 随后触发的 feed/all 响应会被同一监听器捕获并外发。
+ * 随后触发的 feed/all 响应会被同一监听器捕获并投递。
  *
  * 设计原则（用户要求）：项目**不定义轮询时间**，只由页面自身的请求驱动——
  * 本函数由「update 响应 update_num>0」触发；找不到按钮就快速返回，
@@ -501,40 +434,6 @@ async function bringToFrontIfHidden(page: Page): Promise<Page | null> {
   return prevFront;
 }
 
-/**
- * 滚动补全：上次最新饼之后还有未加载的新动态（单批只返回前 20 条）→ 向下起伏滚动
- * 触发加载下一页（后台滚动不触发 IntersectionObserver，故切回动态页前台），
- * 直到某批响应覆盖「上次最新饼」（监听器把 syncState 置 idle）或达到最大段数。
- *
- * 按当前任务分类协调（避免与任务冲突）：
- * - 触发式（Like/Triple/Search/Follow/Comment/CloseVideo/OpenVideo 短任务）：等待任务完成后再滚动补全
- * - 持续式（BrowseHome/BrowseDynamic/BrowseProfile/WatchVideo/Rest 长任务）：暂停任务流，直接切动态页前台滚动 → 返回原前台页
- * 补全滚动期间需阻塞任务流：若调用方（runFetchSession 入口）已暂停则复用；独立补全（初始加载/滚动响应）时自己暂停。
- */
-async function startCatchUpScroll(page: Page): Promise<void> {
-  const task = fetchCoordinator.currentTaskName;
-  const ownPause = !fetchCoordinator.paused; // 已在暂停中（runFetchSession 入口已 pause）则不重复，避免提前解除
-  if (ownPause) {
-    fetchCoordinator.pause();
-  }
-  try {
-    // 触发式：先等当前任务完成（pause 已拦住新任务启动）→ 切动态页前台滚动 → 返回原标签
-    if (TRIGGER_TASKS.has(task)) {
-      await waitTaskIdle(20_000);
-    }
-    // 持续式及默认：暂停任务流（ownPause 已处理）→ 切动态页前台滚动 → 回原前台页
-    const prevFront = await bringToFrontIfHidden(page).catch(() => null);
-    await humanScrollCatchUp(page);
-    if (prevFront) {
-      await prevFront.bringToFront().catch(() => {});
-    }
-  } finally {
-    if (ownPause) {
-      fetchCoordinator.resume();
-    }
-  }
-}
-
 /** 等当前任务完成（executor 在任务结束时把 currentTaskName 置 'IDLE'） */
 async function waitTaskIdle(timeoutMs: number): Promise<void> {
   const deadline = Date.now() + timeoutMs;
@@ -547,39 +446,265 @@ async function waitTaskIdle(timeoutMs: number): Promise<void> {
   }
 }
 
+/** 触发式任务的等待上限：超过则不再等（告警后直接操作页面，避免蹲饼被卡死） */
+const TRIGGER_WAIT_MS = 20_000;
+
 /**
- * 起伏式慢速滚动（模拟真人，避免跳屏风控）：缓慢向下滚动并偶尔轻微回滚，
- * 直到补全完成（syncState 回 idle）或达到最大段数。
+ * 取得「页面独占权」——蹲饼与滚动补全在操作页面前必须先调用（统一策略）：
+ *
+ * 1. **触发式任务**（短、高度自闭）→ 等它**顺利完成**（上限 `TRIGGER_WAIT_MS`）；
+ * 2. **持续式任务**（长、过程不稳定）→ 请求**提前中止**（`abortCurrentTask()` →
+ *    任务在分片检查点收尾）并等它结束；
+ * 3. **浏览器独占型任务**（登录/登出流程）→ **让出**本次机会（返回 false）。
+ *
+ * 未登记在任何一个清单里的任务按 ① 处理（并告警），保证「所有任务都有明确处理」。
+ *
+ * @returns 是否已取得独占权（false = 本次蹲饼/补全应放弃）
  */
-async function humanScrollCatchUp(page: Page): Promise<void> {
-  const viewH = page.viewport()?.height ?? 800;
-  for (let i = 0; i < MAX_CATCHUP_SCROLL; i++) {
-    if (syncState !== 'catching-up') {
-      break; // 已覆盖上次最新饼 → 完成
+async function acquirePageOwnership(task: string): Promise<boolean> {
+  if (!task || task === 'IDLE') {
+    return true; // 无任务在执行，页面空闲
+  }
+  if (EXCLUSIVE_TASKS.has(task)) {
+    return false;
+  }
+  if (SUSTAINED_TASKS.has(task)) {
+    const aborted = await fetchCoordinator.abortCurrentTask().catch(() => false);
+    if (aborted) {
+      logDyn(`⏹️ 已提前中止持续性任务（${task}），页面交给蹲饼`);
     }
-    // 缓慢向下滚一段（~1/5 视口），smooth 平滑、不跳屏
-    const dy = Math.round(viewH * (0.15 + Math.random() * 0.08));
-    await withTimeout(
-      page.evaluate((d) => window.scrollBy({ top: d, behavior: 'smooth' }), dy),
-      3000
-    ).catch(() => {});
-    await sleep(500 + Math.random() * 500);
-    // 真人浏览起伏：偶尔轻微回滚
-    if (Math.random() < 0.2) {
-      const back = Math.round(viewH * (0.03 + Math.random() * 0.03));
-      await withTimeout(
-        page.evaluate((d) => window.scrollBy({ top: -d, behavior: 'smooth' }), back),
-        3000
-      ).catch(() => {});
-      await sleep(300 + Math.random() * 300);
+    return true;
+  }
+  // 触发式（含未登记的短任务/流程性任务）：等它顺利完成
+  if (!TRIGGER_TASKS.has(task)) {
+    warnDyn(`⚠️ 未登记的任务类型（${task}），按触发式处理：等其完成`);
+  }
+  await waitTaskIdle(TRIGGER_WAIT_MS);
+  return true;
+}
+
+/**
+ * 第三类任务（登录/登出）是否已接管浏览器。
+ *
+ * 执行器在任务开始时写 `currentTaskName`，因此它一旦变为 `Login`/`Logout`，
+ * 说明最高优先级任务已开始 —— 蹲饼必须**立刻让出浏览器**（不再切前台/点击/滚动/刷新）。
+ */
+const exclusiveTaskRunning = (): boolean => EXCLUSIVE_TASKS.has(fetchCoordinator.currentTaskName);
+
+/**
+ * 蹲饼会话/补全是否必须**立即中止**：
+ * - 蹲饼已被关闭（`setFetchEnabled(false)`，如 stopFetch / 登出）；
+ * - 第三类任务（登录/登出）已接管浏览器（最高优先级，强制中断其他任何操作）。
+ *
+ * 会话在会等人的检查点调用它，命中则立即收尾并**不再改动页面**。
+ */
+const shouldAbortFetch = (): boolean => !fetchEnabled || exclusiveTaskRunning();
+
+/**
+ * 「模拟状态」保护：会话开始前快照，会话结束（含异常）后恢复。
+ *
+ * 蹲饼会切前台、点按钮、刷新、必要时关页重开——都可能破坏模拟对页面的假设
+ * （`context.page` 失效 / 前台被抢 / 滚动位置变化）。快照/恢复由内核提供
+ * （`fetchCoordinator.snapshotSimulationState`）；未注册（无模拟运行）时直接执行。
+ */
+async function withSimulationStateRestore<T>(fn: () => Promise<T>): Promise<T> {
+  const restore = (await fetchCoordinator.snapshotSimulationState?.().catch(() => null)) ?? null;
+  try {
+    return await fn();
+  } finally {
+    // 第三类任务（登录/登出）已接管浏览器 → 不再动页面，避免与它抢前台/滚动
+    if (restore && !exclusiveTaskRunning()) {
+      await restore().catch(() => undefined);
     }
   }
-  if (syncState === 'catching-up') {
-    // 滚动达到上限仍未覆盖（可能已到底或接口异常）→ 停止本轮补全，避免卡死
+}
+
+/** 读页面滚动位置与「是否已在文档底部」（滚动补全推进/到底判定用） */
+async function readScrollMetrics(page: Page): Promise<{ y: number; atBottom: boolean }> {
+  const m = (await withTimeout(
+    page.evaluate(() => {
+      const doc = document.documentElement;
+      const y = window.scrollY || doc.scrollTop || 0;
+      const h = Math.max(doc.scrollHeight, document.body ? document.body.scrollHeight : 0);
+      const vh = window.innerHeight || 0;
+      return { y, h, vh };
+    }),
+    3000
+  ).catch(() => null)) as { y: number; h: number; vh: number } | null;
+  if (!m) {
+    return { y: 0, atBottom: false };
+  }
+  return { y: m.y, atBottom: m.vh > 0 && m.y + m.vh >= m.h - 50 };
+}
+
+/**
+ * 滚动补全（强制）：本批响应未翻过基线 → 基线之后还有没加载到的动态 → 逼页面加载更旧的页。
+ *
+ * 与任务流的协调（与 runFetchSession 同一套策略）：
+ * 1. 先 `acquirePageOwnership()`——触发式等其完成 / 持续式提前中止 / 登录登出让出本次机会；
+ * 2. 补全前后 `withSimulationStateRestore()` 快照/恢复模拟状态。
+ * 补全期间阻塞任务流：调用方（runFetchSession 入口）已暂停则复用，否则自己暂停并在结束时恢复。
+ */
+async function startCatchUpScroll(page: Page): Promise<void> {
+  if (catchUpRunning) {
+    return; // 已有补全在跑（防重入）
+  }
+  catchUpRunning = true;
+  const task = fetchCoordinator.currentTaskName;
+  const ownPause = !fetchCoordinator.paused; // 已在暂停中则不重复 pause，避免提前解除别人的阻塞
+  if (ownPause) {
+    fetchCoordinator.pause();
+  }
+  try {
+    if (!(await acquirePageOwnership(task))) {
+      syncState = 'idle';
+      logDyn(`⏭️ 当前任务（${task}）独占浏览器，跳过本次滚动补全（基线保持，待下次继续）`);
+      return;
+    }
+    if (shouldAbortFetch()) {
+      syncState = 'idle';
+      logDyn('⏭️ 蹲饼已关闭 / 登录登出接管浏览器，跳过本次滚动补全（基线保持，待下次继续）');
+      return;
+    }
+    await withSimulationStateRestore(async () => {
+      const prevFront = await bringToFrontIfHidden(page).catch(() => null); // 后台滚动不触发加载
+      try {
+        await humanScrollCatchUp(page);
+      } finally {
+        if (prevFront && !exclusiveTaskRunning()) {
+          await prevFront.bringToFront().catch(() => {});
+        }
+      }
+    });
+  } finally {
+    if (ownPause) {
+      fetchCoordinator.resume();
+    }
+    catchUpRunning = false; // 恢复模拟状态 + resume 之后才算真正让出页面
+    logDyn('🏁 滚动补全已收尾（页面与任务流已交还）');
+  }
+}
+
+/**
+ * 强制滚动直到基线位置（不设段数上限，允许它往前拉足够长时间）。
+ *
+ * 「滚动到底」判定（不靠固定段数）：每滚一段后同时看两个信号——
+ * 1) 当前已加载列表里**最旧**的那条动态（`bottomLoadedId`）有没有变：变了 = 又加载出更旧的内容，继续拉；
+ * 2) 页面是否**已在文档底部**（`scrollY + 视口 >= 文档高度`）。
+ * 两者同时成立且连续多段无变化 → 判定已到底（动态页没有更多可加载）。
+ *
+ * 「滚动无效」判定：若连续多段 `scrollY` 完全没变，说明滚轮没作用到可滚动主体（**不是到底**）——
+ * 这种情况不重置基线（否则会误丢数据），只报失败留给下次继续。
+ *
+ * 结果：翻过基线 = 成功（监听器已把 syncState 置 idle）；到底/超时 = 失败且基线重置为「本次已获取最新」；
+ * 滚动无效/被中止 = 失败但基线保持不变。
+ */
+async function humanScrollCatchUp(page: Page): Promise<void> {
+  const target = baselinePubTs;
+  const viewH = page.viewport()?.height ?? 800;
+  const deadline = Date.now() + CATCHUP_MAX_MS;
+  const scroller = new HumanScroller();
+  let bottomRounds = 0;
+  let stuckRounds = 0;
+  let reason: 'bottom' | 'stuck' | 'timeout' = 'timeout';
+
+  while (syncState === 'catching-up' && Date.now() < deadline && !shouldAbortFetch()) {
+    const before = await readScrollMetrics(page);
+    const bottomBefore = bottomLoadedId;
+    // 真实鼠标滚轮向下滚一段（分步、走页面主体，避开局部滚动容器）
+    const segment = Math.round(viewH * (0.6 + Math.random() * 0.4));
+    await scroller.scrollToPosition(page, before.y + segment).catch(() => {});
+    await sleep(CATCHUP_STEP_WAIT_MS + Math.random() * 500); // 等页面加载下一页
+    if (syncState !== 'catching-up') {
+      return; // 本轮期间已翻过基线（监听器已收尾）→ 立刻停滚，不再多滚一段
+    }
+
+    if (bottomLoadedId !== bottomBefore) {
+      bottomRounds = 0; // 又加载出更旧的内容 → 还能继续往前拉
+      stuckRounds = 0;
+      continue;
+    }
+    const after = await readScrollMetrics(page);
+    if (after.y <= before.y + 10) {
+      stuckRounds += 1; // 滚动位置没变 → 滚轮没作用到主体（不是到底）
+      if (stuckRounds >= CATCHUP_STUCK_ROUNDS) {
+        reason = 'stuck';
+        break;
+      }
+      continue;
+    }
+    stuckRounds = 0;
+    if (after.atBottom) {
+      bottomRounds += 1;
+      if (bottomRounds >= CATCHUP_BOTTOM_ROUNDS) {
+        reason = 'bottom';
+        break;
+      }
+    } else {
+      bottomRounds = 0;
+    }
+  }
+
+  if (syncState !== 'catching-up') {
+    return; // 过程中某批翻过基线 → 成功（监听器已收尾）
+  }
+  syncState = 'idle';
+  if (shouldAbortFetch()) {
+    logDyn('⏭️ 滚动补全中止（蹲饼已关闭 / 登录登出接管浏览器），基线保持不变，下次继续');
+    return;
+  }
+  if (Date.now() >= deadline) {
+    reason = 'timeout';
+  }
+  catchUpFailed = true;
+  if (reason === 'stuck') {
+    warnDyn(
+      `❌ 滚动补全失败（滚动无法生效）：连续 ${CATCHUP_STUCK_ROUNDS} 段滚动位置未变化，` +
+        `基线保持 ${formatAbsTime(target)}，下次继续尝试`
+    );
+    return;
+  }
+  // 到底 / 超时：缺口已超出可加载范围 → 基线重置为最新已获取（可见范围内已全部投递）
+  if (newestFetchedPubTs > baselinePubTs) {
+    baselinePubTs = newestFetchedPubTs;
+  }
+  warnDyn(
+    `❌ 滚动补全失败（${reason === 'bottom' ? '已滚动到底' : '超出时间上限'}）仍未到达基线 ${formatAbsTime(target)}` +
+      `｜可见范围内动态已全部投递，基线重置为最新已获取：${formatAbsTime(baselinePubTs)}`
+  );
+}
+
+/** 等正在进行的滚动补全**真正结束**（超时则强制收尾，避免两个补全争抢页面）
+ *
+ * 判定依据是 `catchUpRunning`（补全函数已退出、页面已让出）而不只是 `syncState`：
+ * `syncState` 在「翻过基线」那一刻就被监听器置 idle，此时滚动循环可能还在本轮滚动中。
+ * @returns true=补全已正常收尾（翻过基线/到底/滚动无效）；false=等待超时被强制结束 */
+async function waitOngoingCatchUp(): Promise<boolean> {
+  const busy = (): boolean => catchUpRunning || syncState === 'catching-up';
+  if (!busy()) {
+    return true;
+  }
+  logDyn('⏳ 滚动补全进行中，等它结束…');
+  const deadline = Date.now() + CATCHUP_MAX_MS + 5_000;
+  while (Date.now() < deadline && busy()) {
+    await sleep(300);
+  }
+  if (busy()) {
     syncState = 'idle';
-    catchUpBoundaryPubTs = 0; // 清理残留边界，防止污染后续增量判断
-    sessionLatest = null;
-    warnDyn('⚠️ 滚动补全达到上限仍未覆盖上次最新饼（可能已无更多或加载异常），暂停本轮');
+    warnDyn('⚠️ 等待滚动补全超时，强制结束本轮补全（基线保持，下次继续）');
+    return false;
+  }
+  return true;
+}
+
+/** 点击后等补全稳定：点击后 3s 起，若已触发滚动补全则等它**真正结束**（翻过基线 / 到底 / 被中止） */
+async function waitCatchUpDone(clickedAt: number): Promise<void> {
+  const deadline = Date.now() + CATCHUP_MAX_MS + 5_000;
+  while (Date.now() < deadline && !shouldAbortFetch()) {
+    if (!catchUpRunning && syncState !== 'catching-up' && Date.now() - clickedAt > 3000) {
+      return; // 未触发补全（已翻过基线）或补全已真正结束（页面已让出）
+    }
+    await sleep(500);
   }
 }
 
@@ -630,20 +755,24 @@ async function clickNotifyButton(page: Page): Promise<void> {
 let sessionActive = false;
 /** 本次蹲饼获取期间是否已取到新动态（deliverDynamics 置位；runFetchSession 开头/finally 重置） */
 let sessionDelivered = false;
-// 任务分类（触发式/持续式）常量与判断见 fetch-coordinator：TRIGGER_TASKS / SUSTAINED_TASKS / isSustainedTask
 
-/** 停止录屏并提示保存位置（幂等） */
-async function finishRecording(rec: FetchRecording | null): Promise<void> {
-  if (!rec) {
-    return;
-  }
-  const out = await stopFetchRecording(rec);
-  if (out) {
-    logDyn(`🎬 录屏已保存：${out}（${rec.frames.length} 帧）`);
+/**
+ * 等待正在进行的蹲饼会话 / 滚动补全**真正让出页面**（幂等；无会话时立即返回）。
+ *
+ * 供内核在启动**最高优先级任务**（登录/登出）前调用：
+ * 先 `setFetchEnabled(false)`（即 `kernel.stopFetch()`）让它不再继续，
+ * 再等它真正让出浏览器，避免登录/登出与残留的蹲饼操作争抢前台与标签页。
+ */
+export async function waitForFetchIdle(timeoutMs = 10_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline && (sessionActive || catchUpRunning || syncState === 'catching-up')) {
+    await sleep(200);
   }
 }
+// 任务分类（触发式/持续式/浏览器独占型）常量见 fetch-coordinator：TRIGGER_TASKS / SUSTAINED_TASKS /
+// EXCLUSIVE_TASKS / isSustainedTask；取得页面独占权的统一入口见 acquirePageOwnership()
 
-/** 点击后未取到增量 → 刷新动态页兜底（触发完整初始 feed/all，已收录的动态会被增量检测补收）。录屏会覆盖刷新画面。 */
+/** 点击后未取到增量 → 刷新动态页兜底（刷新会重新请求 feed/all，其中没见过的动态照常投递） */
 async function retryByRefresh(page: Page): Promise<void> {
   if (!lastClickMissed) {
     return;
@@ -652,17 +781,18 @@ async function retryByRefresh(page: Page): Promise<void> {
   refreshedThisFetch = true;
   // 开新时间窗：刷新后的 feed/all 若仍未取到，会走「刷新后未发现」提示
   justClickedUntil = Date.now() + 5000;
-  logDyn('🔄 点击未取到增量，刷新动态页兜底');
+  logDyn('🔄 点击后尚未出现 → 刷新动态页再试一次');
   await withTimeout(page.reload({ waitUntil: 'domcontentloaded' }), 30_000).catch(() => {});
 }
 
 /**
- * 刷新兜底后仍未取到新动态 → 二次尝试：先恢复任务流，等待 1 分钟后重新阻塞并再次刷新动态页。
+ * 刷新兜底后仍未取到新动态 → 二次尝试：先恢复任务流，等待 1 分钟后**重新取得页面独占权**再刷新。
  * 用于处理「收录延迟」——首次刷新时后端尚未把新动态排入 feed，稍等再刷可命中；
  * 已取到增量（sessionDelivered）时直接跳过。
  *
  * 等待期间**不阻塞任务流**：先 resume 恢复生成/执行，让 60 秒不浪费（任务继续跑）；
- * 到点二次刷新前再 pause 重新阻塞，避免刷新动作与任务流并发冲突。
+ * 到点后重新 `acquirePageOwnership()`（此时可能已在跑别的任务：触发式等完成 / 持续式提前中止 /
+ * 登录登出让出本次机会），取得独占权后再刷新，避免刷新动作与任务流并发冲突。
  */
 async function retryRefreshAfterMinute(page: Page): Promise<void> {
   if (sessionDelivered) {
@@ -670,21 +800,37 @@ async function retryRefreshAfterMinute(page: Page): Promise<void> {
   }
   // 等待期间先恢复任务流（runFetchSession finally 还会 resume，幂等无副作用）
   fetchCoordinator.resume();
-  logDyn('⏳ 刷新后仍未取到新动态，先恢复任务流，等待 60 秒后再次刷新…');
-  await sleep(60_000);
+  logDyn('⏳ 仍未出现（收录延迟）：先恢复任务流，60 秒后重试｜基线未推进，该动态不会丢失');
+  // 可中断等待：期间得新动态 → 提前结束；蹲饼被关闭 / 登录登出接管浏览器 → 立即放弃二次刷新
+  const waitDeadline = Date.now() + 60_000;
+  while (Date.now() < waitDeadline && !sessionDelivered && !shouldAbortFetch()) {
+    await sleep(500);
+  }
   if (sessionDelivered) {
     logDyn('✅ 等待期间已取到新动态（任务流继续），取消二次刷新');
     return;
   }
-  // 到点：重新阻塞任务流，再做二次刷新
+  if (shouldAbortFetch()) {
+    logDyn('⏭️ 蹲饼已关闭 / 登录登出接管浏览器，取消二次刷新');
+    return;
+  }
+  // 到点：重新阻塞任务流，并重新取得页面独占权（此时可能已有新任务在跑）
   fetchCoordinator.pause();
+  const task = fetchCoordinator.currentTaskName;
+  if (!(await acquirePageOwnership(task))) {
+    logDyn(`⏭️ 当前任务（${task}）独占浏览器，取消二次刷新`);
+    return;
+  }
   refreshedThisFetch = true;
   // 开新时间窗：二次刷新后的 feed/all 若仍未取到，会走「刷新后未发现」提示
   justClickedUntil = Date.now() + 5000;
   logDyn('🔄 等待 60 秒后再次刷新动态页（二次尝试获取 update 增量）');
   await withTimeout(page.reload({ waitUntil: 'domcontentloaded' }), 30_000).catch(() => {});
   await sleep(1500); // 等刷新后的 feed/all 响应处理（取到则 deliver，未取到提示「刷新后未发现」）
-  // 二次刷新仍未取到 → 第三层兜底：关闭动态页重新打开（排除页面状态异常；新页初始加载走增量检测/滚动补全重新拉取）
+  if (sessionDelivered) {
+    logDyn('✅ 二次刷新取到增量（确认为后端收录延迟，最终未丢失）');
+  }
+  // 二次刷新仍未取到 → 第三层兜底：关闭动态页重新打开（排除页面状态异常；新页 feed/all 再拉一次）
   if (!sessionDelivered) {
     await reopenDynamicPage(page);
   }
@@ -693,8 +839,8 @@ async function retryRefreshAfterMinute(page: Page): Promise<void> {
 /**
  * 第三层兜底：二次刷新后仍未取到新动态 → 关闭动态页重新打开。
  * 用于排除「动态页页面状态异常」类问题（页面 JS 卡死 / feed 流断掉 / 点击刷新未真正生效）：
- * 关闭旧动态页 → 新开一个动态页标签并重新挂接口监听 → 新页初始 feed/all 加载走统一增量检测
- * （有基线时含滚动补全追基线），尝试重新拉取 update 提示的增量。
+ * 关闭旧动态页 → 新开一个动态页标签并重新挂接口监听 → 新页初始 feed/all 中
+ * 没见过的动态照常投递，尝试重新拉取 update 提示的增量。
  * 新页作为后续动态页常驻（监听器随新页生效，后续 update 由新页触发 runFetchSession）。
  */
 async function reopenDynamicPage(page: Page): Promise<void> {
@@ -703,22 +849,24 @@ async function reopenDynamicPage(page: Page): Promise<void> {
   await page.close().catch(() => {});
   try {
     const newPage = await browser.newPage();
-    attachDynamicFeedListener(newPage); // 立即挂监听，新页初始加载即可走增量检测
+    attachDynamicFeedListener(newPage); // 立即挂监听，新页初始 feed/all 即可按「没见过的=新增」投递
     await withTimeout(newPage.goto('https://t.bilibili.com/', { waitUntil: 'domcontentloaded' }), 30_000).catch(() => {});
     if (!isDynamicPageUrl(newPage.url())) {
       await newPage.close().catch(() => {});
       warnDyn('⚠️ 重开动态页失败（未进入动态页），本次兜底无效');
       return;
     }
-    // 等新页初始 feed/all 响应处理（取到增量提前结束；最长 20s）
+    // 等新页初始 feed/all 响应处理（取到增量 / 触发强制补全则提前结束；最长 20s）
     const deadline = Date.now() + 20_000;
-    while (Date.now() < deadline && !sessionDelivered) {
+    while (Date.now() < deadline && !sessionDelivered && syncState !== 'catching-up') {
       await sleep(500);
     }
+    // 新页初始 feed/all 未翻过基线时会触发强制滚动补全 → 等它结束（补全占用页面）
+    await waitOngoingCatchUp();
     if (sessionDelivered) {
       logDyn('✅ 重开动态页后获取到新动态');
     } else {
-      warnDyn('⚠️ 重开动态页后仍未取到新动态（可能收录延迟 / B 站接口异常，等下次 update 再试）');
+      warnDyn('⚠️ 三层兜底后仍未取到新动态（收录延迟较长 / 接口异常，等下次 update 再试）｜基线未推进，之后仍会被取到');
     }
   } catch (err) {
     warnDyn(`⚠️ 重开动态页异常: ${(err as Error).message}`);
@@ -726,16 +874,21 @@ async function reopenDynamicPage(page: Page): Promise<void> {
 }
 
 /**
- * 被动蹲饼获取流程：update 提示有更新时，根据**当前正在执行的任务**分类处理（触发式等待完成 / 持续式暂停），
- * 避免与任务冲突。**入口即暂停任务流**——生成器 next 检查 paused，不再生成新任务：
- * - BrowseDynamic（持续式 + 冲突最大）：直接中断结束当前任务 → 回滚顶部 → 点击 → 等补全 → 刷新兜底
- * - 持续式（BrowseHome/BrowseProfile/WatchVideo/Rest 长任务）：暂停任务流 → 切动态页前台 → 点击 → 等 feed/all → 刷新兜底
- * - 触发式（Like/Triple/Search/Follow/Comment/CloseVideo/OpenVideo 短任务）：等待当前任务完成 → 切动态页前台 → 点击
- * - Login 不会触发被动蹲饼（登录是打开浏览器→主页→登录→动态页的前置流程之一，动态页监听未就绪）
+ * 被动蹲饼获取流程：update 提示有更新时，**先取得页面独占权，再操作页面**。
+ *
+ * 统一策略（按任务类别分派，不再有单任务专项分支）：
+ * 1. 暂停任务流（生成器不再生成新任务）；
+ * 2. 等上一次滚动补全结束（`syncState` 是模块级共享状态）；
+ * 3. `acquirePageOwnership()`：
+ *    - 触发式任务（短、高度自闭）→ **等它顺利完成**；
+ *    - 持续式任务（长、过程不稳定）→ **提前中止**并等它收尾；
+ *    - 登录/登出（`EXCLUSIVE_TASKS`）→ 让出，**本次蹲饼放弃**（等下次 update）；
+ * 4. 快照模拟状态 → 切动态页前台 → 点击「有新动态」→ 等响应投递（必要时强制滚动补全到基线）→ 刷新兜底 →（60s 后）二次刷新；
+ * 5. 恢复模拟状态（主操作页 / 前台 / 滚动位置）→ 恢复任务流。
  */
 async function runFetchSession(page: Page, updateNum: number): Promise<void> {
   if (!fetchEnabled) {
-    return; // 蹲饼已关闭：不再触发点击获取 / 滚动补全
+    return; // 蹲饼已关闭：不再触发点击获取
   }
   if (sessionActive) {
     return; // 上一次蹲饼获取进行中，忽略
@@ -744,103 +897,56 @@ async function runFetchSession(page: Page, updateNum: number): Promise<void> {
   sessionDelivered = false; // 本次蹲饼尚未取到新动态
   const task = fetchCoordinator.currentTaskName;
   logDyn(`🎯 被动蹲饼触发（当前任务: ${task || '无'}，update ${updateNum} 条）`);
-  // 监听到 update 即暂停任务流：生成器 next 检查 paused，不再生成新任务。
-  // 触发式任务等待完成即可；持续式任务暂停即可。
+  // 入口即暂停任务流：生成器 next 检查 paused，不再生成新任务
   fetchCoordinator.pause();
-  // 若上次滚动补全仍在进行（syncState='catching-up'），先等它完成再处理本次蹲饼，
-  // 避免补全与本次点击/增量判断并发共享 syncState/catchUpBoundaryPubTs/sessionLatest 造成冲突
-  // （补全由初始加载/无边界响应异步触发，不受 sessionActive 保护）
-  if (syncState === 'catching-up') {
-    logDyn('⏳ 上次滚动补全仍在进行，等待完成…');
-    const catchUpDeadline = Date.now() + 35_000;
-    while (Date.now() < catchUpDeadline && syncState === 'catching-up') {
-      await sleep(300);
-    }
-    if (syncState === 'catching-up') {
-      // 补全超时仍未完成（可能滚动卡住）→ 强制结束补全并清理状态，避免阻塞本次蹲饼
-      syncState = 'idle';
-      catchUpBoundaryPubTs = 0;
-      sessionLatest = null;
-      warnDyn('⚠️ 等待滚动补全超时，强制结束补全');
-    }
-  }
-  // 录屏：记录本次获取完整流程（切前台→点击→feed/all 重载→增量判断），用于回放定位获取不到的问题
-  const rec = await startFetchRecording(page);
-  if (rec) {
-    logDyn('🎬 开始录屏记录本次获取流程');
-  }
+
   try {
-    if (task === 'BrowseDynamic') {
-      // 持续式 + 冲突最大（都在动态页）：直接中止当前任务（走控制器中断）→ 回滚顶部 → 点击 → 等补全 → 刷新兜底
-      await fetchCoordinator.abortCurrentTask();
-      await sleep(600); // 给 BrowseDynamic 主体响应中断并收尾
-      await withTimeout(
-        page.evaluate(() => window.scrollTo(0, 0)),
-        3000
-      ).catch(() => {});
-      await clickNotifyButton(page); // 动态页已在前台，直接点击
-      // 等点击触发的 feed/all 响应处理 + 滚动补全完成（syncState 回 idle）后再恢复任务流
-      const afterClick = Date.now();
-      await waitCatchUpDone(afterClick);
-      // 点击后未取到增量 → 刷新动态页兜底（动态页仍在前台，录屏覆盖刷新画面）
-      await retryByRefresh(page);
-      await sleep(1500); // 等刷新后的初始 feed/all 响应处理（取到则 deliver，未取到提示「刷新后未发现」）
-      // 刷新后仍未取到 → 等 1 分钟再次刷新（任务流保持阻塞），处理收录延迟
-      await retryRefreshAfterMinute(page);
-      // 停录：动态页仍在前台，已覆盖点击+刷新（含二次刷新）全流程
-      await finishRecording(rec);
-      logDyn('✅ 被动蹲饼（BrowseDynamic 场景）完成，恢复任务流');
-    } else if (SUSTAINED_TASKS.has(task)) {
-      // 持续式（浏览主页/UP 主页/观看视频/短休息）：暂停任务流（入口已暂停）→ 切动态页前台 → 点击 → 等 feed/all → 刷新兜底
-      const prevFront = await bringToFrontIfHidden(page).catch(() => null);
-      // 录屏期：保持动态页前台，让点击后的 feed/all 重载可被录到（后台标签 screencast 不出帧）
-      try {
-        await clickNotifyButton(page);
-        await sleep(2500); // 等点击后 feed/all 异步响应处理（WARN/fresh 判断），期间动态页保持前台
-        await retryByRefresh(page);
-        await sleep(1500); // 等刷新后的初始 feed/all 响应处理（取到则 deliver，未取到提示「刷新后未发现」）
-        await retryRefreshAfterMinute(page);
-        await finishRecording(rec);
-      } finally {
-        if (prevFront) {
-          void prevFront.bringToFront().catch(() => {});
-        }
-      }
-    } else {
-      // 触发式（Like/Triple/Search/Follow/Comment/CloseVideo/OpenVideo 短任务）：等待当前任务完成（pause 已拦住新任务）→ 切动态页前台点击
-      await waitTaskIdle(20_000);
-      const prevFront = await bringToFrontIfHidden(page).catch(() => null);
-      try {
-        await clickNotifyButton(page);
-        await sleep(2500);
-        await retryByRefresh(page);
-        await sleep(1500);
-        await retryRefreshAfterMinute(page);
-        await finishRecording(rec);
-      } finally {
-        if (prevFront) {
-          void prevFront.bringToFront().catch(() => {});
-        }
-      }
+    // 上一次滚动补全若还在进行，先等它结束（补全使用模块级共享状态且占用页面）
+    await waitOngoingCatchUp();
+
+    // 取得页面独占权（触发式等完成 / 持续式提前中止 / 登录登出让出本次机会）
+    if (!(await acquirePageOwnership(task))) {
+      logDyn(`⏭️ 当前任务（${task}）独占浏览器，本次蹲饼放弃（等下次 update）`);
+      return;
     }
+    if (shouldAbortFetch()) {
+      logDyn('⏭️ 蹲饼已关闭 / 登录登出接管浏览器，本次蹲饼放弃');
+      return;
+    }
+
+    // 独占页面后的完整获取流程；前后快照/恢复模拟状态（蹲饼会切前台/刷新/必要时关页重开）
+    await withSimulationStateRestore(async () => {
+      // 切动态页前台（后台不能可靠点击/滚动）
+      const prevFront = await bringToFrontIfHidden(page).catch(() => null);
+      try {
+        await clickNotifyButton(page);
+        // 等点击触发的 feed/all 响应处理；若本批未翻过基线（新增超过一页）则等强制补全结束
+        await waitCatchUpDone(Date.now());
+        if (shouldAbortFetch()) {
+          return; // 登录登出已接管浏览器 → 不再继续操作页面
+        }
+        // 点击后未取到增量 → 刷新动态页兜底
+        await retryByRefresh(page);
+        await sleep(1500); // 等刷新后的 feed/all 响应处理（取到则 deliver，未取到提示「刷新后未发现」）
+        if (shouldAbortFetch()) {
+          return;
+        }
+        // 刷新后仍未取到 → 等 1 分钟再次刷新（任务流短暂恢复，到点重新取得独占权）
+        await retryRefreshAfterMinute(page);
+      } finally {
+        // 未注册模拟状态快照器时的兜底：至少把原前台页还回去（登录登出接管时不动）
+        if (prevFront && !exclusiveTaskRunning()) {
+          void prevFront.bringToFront().catch(() => {});
+        }
+      }
+    });
   } finally {
+    // 本会话可能触发了滚动补全（如重开动态页后触发）→ 等它让出页面再恢复任务流
+    await waitOngoingCatchUp();
     fetchCoordinator.resume(); // 恢复任务流（生成器可继续生成下一个任务）
     sessionActive = false;
     sessionDelivered = false; // 本次获取流程结束，重置「已取到」标记
     refreshedThisFetch = false; // 本次获取流程结束，重置刷新标记
-    // 兜底停录（上面异常提前退出时），幂等不重复
-    void finishRecording(rec).catch(() => {});
-  }
-}
-
-/** 点击后等待补全稳定（点击后 3s 起：若触发滚动补全则等其完成；否则视为已完成） */
-async function waitCatchUpDone(afterClickAt: number): Promise<void> {
-  const deadline = Date.now() + 30_000;
-  while (Date.now() < deadline) {
-    if (syncState !== 'catching-up' && Date.now() - afterClickAt > 3000) {
-      return; // 未触发补全（已覆盖基线）或补全已完成
-    }
-    await sleep(500);
   }
 }
 
@@ -871,102 +977,69 @@ export function attachDynamicFeedListener(page: Page): void {
         //   不走直接调接口，避免机器人风控）
         if (isUpdate && updateNum > 0 && dynamics.length === 0) {
           logDyn(`🔔 update 提示 ${updateNum} 条新动态（接口未返回数据，需点击获取）`);
-          void runFetchSession(page, updateNum);
+          void runFetchSession(page, updateNum).catch((err: unknown) => {
+            warnDyn(`⚠️ 蹲饼会话异常（已隔离，不影响宿主进程）: ${(err as Error)?.message ?? err}`);
+          });
           return;
         }
-        // update 接口直接带 items（兼容情况）→ 与初始/轮询一致外发
+        // update 接口直接带 items（兼容情况）→ 与初始/轮询一致投递
         if (dynamics.length === 0) {
           return;
         }
-        // ===== 统一增量检测（越界式单基线：上次已获取最新，持久化 dynId+pubTs 不膨胀）=====
-        // 首次启动（无基线）：首批全量作为初始加载收下，建立基线（最新 dynId + pubTs），不触发滚动补全
-        if (!lastFetchedDynId && !lastFetchedPubTs) {
-          for (const d of dynamics) {
-            collected.push(d);
-          }
-          while (collected.length > MAX_COLLECTED) {
-            collected.shift();
-          }
-          const latest = latestOf(dynamics);
-          lastFetchedDynId = dynId(latest);
-          lastFetchedPubTs = dynPubTs(latest);
-          saveLastFetched(lastFetchedDynId, lastFetchedPubTs);
-          deliverDynamics(dynamics, 'INIT');
-          return;
-        }
+        // 记录本批信息：全局最新时间戳（补全失败时重置基线用）+ 最旧动态（到底判定用）
+        trackBatch(dynamics);
 
-        // 越界式边界判断：本批出现「不晚于基线发布时间」的动态（pubTs <= 边界）→ 已翻过基线 → 增量完整。
-        // 基线 dynId 被删除时，靠 pubTs 仍能判断边界（更旧的动态还在）；dynId 精确匹配作为额外兜底。
-        const boundaryPubTs = catchUpBoundaryPubTs || lastFetchedPubTs;
-        const hasBoundary = dynamics.some((d) => {
+        // ===== 增量投递：只投递「基线之后（pubTs > 基线）+ 没见过」的动态 =====
+        const fresh = dynamics.filter((d) => {
           const id = dynId(d);
           const ts = dynPubTs(d);
-          return (id !== '' && id === lastFetchedDynId) || (ts > 0 && boundaryPubTs > 0 && ts <= boundaryPubTs);
+          return ts > 0 && ts > baselinePubTs && (!id || !seenIds.has(id));
         });
-
-        if (hasBoundary) {
-          // 已越过基线 → 本批中比基线更新的（pubTs > 边界）才是本次新动态 → 增量完整
-          const memSet = new Set(collected.map((d) => dynId(d)));
-          const fresh = dynamics.filter((d) => dynPubTs(d) > boundaryPubTs && !memSet.has(dynId(d)));
-          if (fresh.length > 0) {
-            for (const d of fresh) {
-              collected.push(d);
-            }
-            while (collected.length > MAX_COLLECTED) {
-              collected.shift();
-            }
-            deliverDynamics(fresh, isUpdate ? 'UPDATE' : 'INIT');
-            lastClickMissed = false; // 本批取到增量，清除点击漏抓标记（防一次点击多次响应误刷新）
-          } else if (Date.now() < justClickedUntil) {
-            if (refreshedThisFetch) {
-              warnDyn('⚠️ 刷新后 feed/all 仍未发现新动态（未取到 update 提示的增量）');
-            } else {
-              lastClickMissed = true;
-              warnDyn('⚠️ 点击按钮后 feed/all 未发现新动态（未取到 update 提示的增量）');
-            }
-          }
-          // 基线更新为本次全局最新（第一页最新；pubTs 取最大，不依赖顺序）
-          if (sessionLatest) {
-            lastFetchedDynId = sessionLatest.dynId || lastFetchedDynId;
-            lastFetchedPubTs = sessionLatest.pubTs || lastFetchedPubTs;
+        if (fresh.length > 0) {
+          remember(fresh);
+          // kind 由「本次 startFetch 是否已投递过」决定 —— **不能**用「响应来自 /update 接口」判断：
+          // 本设计里 update 响应只带 update_num、从不带数据（带 items 时会在上面 return），
+          // 真实增量全部来自「点击按钮 / 刷新 / 重开页」触发的 feed/all；
+          // 按接口判断会把每一次增量误标成 'INIT'（实测 run-12 19:20:14、run-14 20:11:31）。
+          deliverDynamics(fresh, deliveredSinceStart ? 'UPDATE' : 'INIT');
+          deliveredSinceStart = true;
+          lastClickMissed = false; // 本批取到增量，清除点击漏抓标记（防一次点击多次响应误刷新）
+        } else if (Date.now() < justClickedUntil) {
+          // 本批没取到新动态：仅对「刚点过按钮」的时间窗做诊断（避免一次点击多次响应时误报）。
+          // ⚠️ 这通常**不是故障**：更新提示的动态刚发布（数秒前），B 站后端还没把它排进 feed
+          //    （收录/排序延迟）→ 前台点击/刷新都看不到。但此时**基线不推进**，该动态之后仍满足
+          //    「pubTs > 基线」，后续重试必能取到，不会丢失。
+          if (refreshedThisFetch) {
+            logDyn('ℹ️ 刷新后仍未出现（更新提示的动态可能刚发布，后端尚未排入 feed）');
           } else {
-            const latest = latestOf(dynamics);
-            lastFetchedDynId = dynId(latest) || lastFetchedDynId;
-            lastFetchedPubTs = dynPubTs(latest) || lastFetchedPubTs;
+            lastClickMissed = true;
+            logDyn('ℹ️ 点击后本次响应尚未出现该动态（多为刚发布的收录延迟）');
           }
-          saveLastFetched(lastFetchedDynId, lastFetchedPubTs);
-          sessionLatest = null;
-          catchUpBoundaryPubTs = 0;
-          syncState = 'idle';
-        } else {
-          // 未越过基线 → 本批都在基线之后（都是新增或已在内存）→ 还没追到上次已获取最新，
-          // 说明上次之后的新动态超过单批数量，还有未加载的 → 触发滚动补全
-          const memSet = new Set(collected.map((d) => dynId(d)));
-          const fresh = dynamics.filter((d) => dynPubTs(d) > boundaryPubTs && !memSet.has(dynId(d)));
-          if (fresh.length > 0) {
-            for (const d of fresh) {
-              collected.push(d);
-            }
-            while (collected.length > MAX_COLLECTED) {
-              collected.shift();
-            }
-            deliverDynamics(fresh, isUpdate ? 'UPDATE' : 'INIT');
-            lastClickMissed = false; // 本批取到增量，清除点击漏抓标记
+        }
+
+        // ===== 边界判定：本批是否已翻过基线（出现「不晚于基线」的动态 → 基线之后的都已拿到）=====
+        const crossed = dynamics.some((d) => {
+          const ts = dynPubTs(d);
+          return ts > 0 && ts <= baselinePubTs;
+        });
+        if (crossed) {
+          if (newestFetchedPubTs > baselinePubTs) {
+            baselinePubTs = newestFetchedPubTs; // 推进基线：避免每轮都重新判边界/重复补全
+            logDyn(`✅ 已覆盖基线（基线推进至 ${formatAbsTime(baselinePubTs)}）`);
           }
-          // 记录本次全局最新（第一页最新），补全完成后提交为基线
-          if (!sessionLatest) {
-            const latest = latestOf(dynamics);
-            sessionLatest = latest ? { dynId: dynId(latest), pubTs: dynPubTs(latest) } : null;
-          }
-          // 固定滚动补全的追边界标（防止补全过程中基线变化导致无法终止）
-          if (!catchUpBoundaryPubTs) {
-            catchUpBoundaryPubTs = lastFetchedPubTs;
-          }
-          if (syncState !== 'catching-up') {
-            logDyn(`🔁 本批未越过已抓基线（时间边界）→ 滚动加载补全`);
-            syncState = 'catching-up';
-            void startCatchUpScroll(page);
-          }
+          syncState = 'idle'; // 若正在滚动补全 → 目标已达成，到此结束
+          catchUpFailed = false;
+          return;
+        }
+        // 本批全在基线之后 → 中间还有没加载到的（新增超过一页）→ 强制滚动补全到基线
+        if (syncState !== 'catching-up') {
+          logDyn('🔁 本批未翻过基线（中间还有未加载的动态）→ 强制滚动补全到基线…');
+          syncState = 'catching-up';
+          void startCatchUpScroll(page).catch((err: unknown) => {
+            syncState = 'idle'; // 异常也要保证状态能收尾，否则后续会话会被卡住
+            catchUpRunning = false;
+            warnDyn(`⚠️ 滚动补全异常（已隔离，不影响宿主进程）: ${(err as Error)?.message ?? err}`);
+          });
         }
       } catch {
         /* JSON 解析失败忽略 */
@@ -975,14 +1048,16 @@ export function attachDynamicFeedListener(page: Page): void {
   });
 }
 
+/** 初始增量获取结果：ready=已覆盖基线；catchup-failed=滚动到底仍未到达基线；timeout=首屏响应超时 */
+export type InitialFetchOutcome = 'ready' | 'catchup-failed' | 'timeout';
+
 /**
- * 等待动态页首次 feed/all 获取流程结束（供启动流程：先完成初次获取，再启动任务生成与执行）。
- * - 等待动态页发出第一个 feed/all（非 update）响应（初始加载）；
- * - 若该响应触发了滚动补全（syncState='catching-up'），继续等到补全完成（回 idle）。
- * @returns true=初次获取完成；false=超时（调用方继续启动，被动蹲饼后台照常）
+ * 等待动态页首次 feed/all 响应到达，并等「初始增量获取」结束（供启动流程调用）。
+ *
+ * 首屏若未翻过基线 → 监听器已启动强制滚动补全，这里等它结束（翻过基线 / 到底 / 超时），
+ * 因此本函数耗时可能较长（由 `CATCHUP_MAX_MS` 兜底）。
  */
-export async function waitForInitialFetch(page: Page, timeoutMs = 25_000): Promise<boolean> {
-  const deadline = Date.now() + timeoutMs;
+export async function waitForInitialFetch(page: Page, timeoutMs = 25_000): Promise<InitialFetchOutcome> {
   // 等动态页第一个 feed/all（初始加载）响应到达
   const got = await new Promise<boolean>((resolve) => {
     const timer = setTimeout(() => {
@@ -1001,21 +1076,26 @@ export async function waitForInitialFetch(page: Page, timeoutMs = 25_000): Promi
     page.on('response', onResp);
   });
   if (!got) {
-    return false;
+    return 'timeout';
   }
-  // 给监听器建基线/判边界的时间；若触发滚动补全则等其完成
-  await sleep(600);
-  while (Date.now() < deadline && syncState === 'catching-up') {
-    await sleep(500);
+  await sleep(600); // 给监听器：登记本批 + 必要时启动滚动补全
+  // 首屏未翻过基线 → 等强制补全结束（可能会拉很久）
+  const settled = await waitOngoingCatchUp();
+  if (!settled) {
+    return 'timeout';
   }
-  return true;
+  return catchUpFailed ? 'catchup-failed' : 'ready';
 }
 
 /**
- * 确保浏览器内存在一个动态页（被动蹲饼目标页）：
- * - 当前活动页已是动态页 → 直接用它（挂监听）；
- * - 其它标签已有动态页 → 复用（挂监听）；
- * - 无 → 新开一个动态页标签（t.bilibili.com）并挂监听（不改变 context.page）。
+ * 确保浏览器内**只有一张**动态页（被动蹲饼目标页），并把监听挂到它上面：
+ * - 当前活动页已是动态页 → 用它；其余多余动态页关闭；
+ * - 否则复用一个已有动态页；其余多余动态页关闭；
+ * - 都没有 → 新开一个动态页标签并挂监听（不改变 context.page）。
+ *
+ * 「只保留一张」是硬约束：多张动态页会各自解析 feed/all、各自发起一次点击获取流程
+ * （去重集合能挡住重复投递，但白花一次点击/刷新流程），并且都作为常驻标签占内存。
+ *
  * 返回动态页；打开失败返回 null。
  */
 export async function ensureDynamicPage(context: TaskContext): Promise<Page | null> {
@@ -1023,18 +1103,27 @@ export async function ensureDynamicPage(context: TaskContext): Promise<Page | nu
   if (!browser) {
     return null;
   }
-  // 当前活动页已是动态页 → 直接使用
-  if (context.page && !context.page.isClosed() && isDynamicPageUrl(context.page.url())) {
-    attachDynamicFeedListener(context.page);
-    return context.page;
+  const openPages = (await browser.pages().catch(() => [] as Page[])).filter((p) => !p.isClosed());
+  const dynamicPages = openPages.filter((p) => isDynamicPageUrl(p.url()));
+
+  // 首选「当前活动页」（若它本身就是动态页）——保证模拟的当前页不被收敛掉；否则用找到的第一张
+  const primary =
+    (context.page && !context.page.isClosed() && isDynamicPageUrl(context.page.url()) ? context.page : null) ??
+    dynamicPages[0] ??
+    null;
+
+  if (primary) {
+    // 收敛：关闭多余的动态页（否则多页会各自触发一次点击获取流程）
+    for (const extra of dynamicPages) {
+      if (extra !== primary) {
+        await extra.close().catch(() => {});
+      }
+    }
+    attachDynamicFeedListener(primary);
+    return primary;
   }
-  // 其它标签已有动态页 → 复用
-  const existing = await findDynamicPage(browser, context.page ?? undefined);
-  if (existing) {
-    attachDynamicFeedListener(existing);
-    return existing;
-  }
-  // 无 → 新开一个动态页标签（后台常驻；context.page 保持不变）
+
+  // 无动态页 → 新开一个动态页标签（后台常驻；context.page 保持不变）
   try {
     const page = await browser.newPage();
     // 动态页长久驻留且后续大量 evaluate → 先注入运行时 shim（防 __name 未定义）
@@ -1050,17 +1139,4 @@ export async function ensureDynamicPage(context: TaskContext): Promise<Page | nu
   } catch {
     return null;
   }
-}
-
-/**
- * 已收集的全部动态（**B 站原始 item**，最新在前，**未做任何筛选**；UP 信息在 `modules.module_author`）。
- * 筛选/过滤请由调用方基于返回的原始数据自行完成。
- */
-export function getCollectedDynamics(): BiliDynamicItem[] {
-  return [...collected].reverse();
-}
-
-/** 已收集动态条数 */
-export function getDynamicCount(): number {
-  return collected.length;
 }

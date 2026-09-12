@@ -47,6 +47,7 @@ export class TaskExecutor {
     let taskCount = 0;
     let successCount = 0;
     let failedCount = 0;
+    let interruptedCount = 0; // 让位式中断（蹲饼抢页面 / 停止模拟）：既不算成功也不算失败
 
     if (this.options.verbose) {
       console.log('🚀 开始执行上线任务流');
@@ -113,7 +114,14 @@ export class TaskExecutor {
           successCount++;
         } else if (log.status === TaskStatus.SKIPPED) {
           continue;
-        } else if (log.status === TaskStatus.INTERRUPTED || log.status === TaskStatus.TERMINATED) {
+        } else if (log.status === TaskStatus.INTERRUPTED) {
+          // 让位式中断：**不是失败，更不终止任务流** → 继续生成并执行下一个任务。
+          // 与 executeTask 的终止契约一致（只有 TERMINATED / 'browser closed by user' 才终止）。
+          // ⚠️ 这里曾与 TERMINATED 合并为 break：当任务主体未在宽限内收尾时，执行器用兜底结果
+          //    （status=INTERRUPTED）判定「中断」→ 直接跳出循环 → 整个模拟被杀 + 页面被清理
+          //    （实测 @2026-09-12 19:20:12 run-12：蹲饼让位 WatchVideo → 模拟行为已结束 → 已关闭 3 个页面）。
+          interruptedCount++;
+        } else if (log.status === TaskStatus.TERMINATED) {
           failedCount++;
           break;
         } else {
@@ -151,6 +159,7 @@ export class TaskExecutor {
       console.log(`\n📊 执行统计:`);
       console.log(`   总任务数: ${taskCount}`);
       console.log(`   成功: ${successCount}`);
+      console.log(`   中断（让位）: ${interruptedCount}`);
       console.log(`   失败: ${failedCount}`);
       console.log(`   总时长: ${(duration / 1000).toFixed(1)}s`);
     }
@@ -228,6 +237,12 @@ export class TaskExecutor {
           fetchCoordinator.currentController = null;
           aborted = execution.aborted;
         }
+        // 主体未在宽限内收尾（已被强制结束）→ `done` 已结束但主体仍在后台操作页面。
+        // 登记为「僵尸主体」：此后若有关页 / 换主操作页的动作（如停止模拟后的页面清理），
+        // 必须先等它退出，否则主体的后续操作会落到错误的页面上。
+        if (!execution.bodyFinished) {
+          fetchCoordinator.trackZombieBody(execution);
+        }
         outcome = (task.getResult?.() ?? undefined) as TaskResult | undefined;
       } else {
         // ②a 一次性任务：执行产物即结果
@@ -278,7 +293,17 @@ export class TaskExecutor {
         }
       }
 
-      if (normalized.status === TaskStatus.INTERRUPTED || normalized.status === TaskStatus.TERMINATED) {
+      // 只有**真正的终止**才结束整条任务流：
+      // - `TERMINATED`（浏览器被关 / 明确终止）
+      // - `reason === 'browser closed by user'`
+      // ⚠️ 让位式中断（`INTERRUPTED`，如蹲饼抢占页面）**不终止任务流**——这是既定契约
+      //   （任务的让位路径应返回 `success: true + data.interrupted`）。
+      //   若把 INTERRUPTED 当终止，一次「主体未在宽限内收尾」的兜底结果就会把整个模拟杀掉
+      //   （实测：蹲饼让位 WatchVideo → 8s 宽限超时 → INTERRUPTED → 任务流终止 → 页面被清理）。
+      //   停止模拟不依赖这条规则：`stopSimulation()` 先置 `control.stopped = true`，生成器返回 null 自然结束任务流。
+      const genuinelyTerminated =
+        normalized.status === TaskStatus.TERMINATED || normalized.reason === 'browser closed by user';
+      if (genuinelyTerminated) {
         this.context.terminated = true;
         this.context.terminationReason = normalized.reason ?? normalized.error ?? 'task interrupted';
       }
@@ -287,6 +312,9 @@ export class TaskExecutor {
         console.log(`[${fmtClock()}] [${task.name}] ✅ 结束 (${(log.duration / 1000).toFixed(1)}s)`);
       } else if (normalized.status === TaskStatus.SKIPPED) {
         console.log(`[${fmtClock()}] [${task.name}] ⏭️ 跳过: ${normalized.reason ?? normalized.error ?? 'pre-check failed'}`);
+      } else if (normalized.status === TaskStatus.INTERRUPTED) {
+        // 中断≠失败：让位（蹲饼抢页）/ 停止模拟都会走到这里，任务流继续（除非是真正的终止）
+        console.log(`[${fmtClock()}] [${task.name}] ⏹️ 中断: ${normalized.reason ?? '让位 / 停止模拟'}`);
       } else {
         console.log(`[${fmtClock()}] [${task.name}] ❌ 失败: ${normalized.error ?? normalized.reason ?? 'unknown error'}`);
         log.error = normalized.error ?? normalized.reason;

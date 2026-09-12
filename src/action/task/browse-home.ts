@@ -6,7 +6,7 @@ import { MousePositionManager } from '../engine/mouse-position-manager';
 import { HumanScroller } from '../engine/human-scroller';
 import { DwellTimeSampler } from '../engine/dwell-time';
 import { DEFAULT_BEHAVIOR_CONFIG } from '../engine/config';
-import { extractLoginUser, collectVideoEntries } from '../../utils/bilibili-dom';
+import { extractLoginUser, collectVideoEntries, isHomePageUrl } from '../../utils/bilibili-dom';
 
 /** 一次刷新最多收集多少个视频（DOM 收集，不耗请求） */
 const CANDIDATE_LIMIT = 40;
@@ -29,65 +29,29 @@ export interface BrowseHomeInput {
 }
 
 /**
- * 刷首页推荐流任务：单次刷新并输出推荐流中的视频列表。
+ * 刷首页推荐流任务（持续性）：在**当前所在的**主页上刷新并浏览推荐流。
  *
- * - preCheck：保证当前在主页。不在主页时优先切换到已打开的主页标签页，没有则新开并导航。
- * - execute：点击主页「换一换」刷新按钮（非整页刷新）→ 拟人滚动浏览 → 收集可见视频 → 输出 videos。
- * - 结果交给任务生成器作为「当前状态」的一个环节，由生成器推演下一个任务。
+ * 与「打开主页」（OpenHomeTask，触发式）分离：
+ * - 打开主页：复用/新开主页标签并把 `context.page` 切过去（一次性）
+ * - 浏览主页：本任务，只在「已就位的主页」上刷新与滚动，与 BrowseDynamic / BrowseProfile 同构
+ *
+ * - preCheck：当前页面必须是主页（`bilibili.com` 根路径）；**不负责进入**
+ * - execute：持续性任务 → 返回控制器；点击「换一换」拉新推荐 → 先停留一眼 →
+ *   按 `browseDepth` 滚动浏览 → 收集可见视频 → 拟人回滚到顶部；落点 `MainState.HOME_FEED`
+ * - 结果 `data.videos` 交给任务生成器作为「当前状态」的一个环节，由生成器推演下一个任务
  */
 export class BrowseHomeTask extends BaseTask {
   constructor(private input: BrowseHomeInput = {}) {
     super('BrowseHome');
   }
 
-  private isHome(url: string): boolean {
-    try {
-      const u = new URL(url);
-      if (!u.hostname.includes('bilibili.com')) {
-        return false;
-      }
-      return u.pathname === '/' || u.pathname === '/index.html';
-    } catch {
-      return false;
-    }
-  }
-
-  /** preCheck：保证当前在主页（切已有主页标签 / 新开并导航） */
+  /** preCheck：当前页面必须是主页 */
   async preCheck(context: TaskContext): Promise<boolean> {
     const page = context.page;
-    const browser = context.browser;
-    if (!browser) {
+    if (!page || !context.browser) {
       return false;
     }
-    try {
-      if (page && this.isHome(page.url())) {
-        return true;
-      }
-
-      const pages = await browser.pages();
-      const homePage = pages.find((p) => {
-        try {
-          return this.isHome(p.url());
-        } catch {
-          return false;
-        }
-      });
-      if (homePage) {
-        await homePage.bringToFront().catch(() => {});
-        context.page = homePage;
-        console.log('   📑 切换到已打开的主页标签');
-        return true;
-      }
-
-      const newPage = await browser.newPage();
-      await newPage.goto('https://www.bilibili.com', { waitUntil: 'networkidle2' });
-      context.page = newPage;
-      console.log('   🆕 新开标签页打开主页');
-      return true;
-    } catch (error) {
-      console.error(`[BrowseHome] preCheck 失败: ${(error as Error).message}`);
-      return false;
-    }
+    return isHomePageUrl(page.url());
   }
 
   /**
@@ -114,8 +78,8 @@ export class BrowseHomeTask extends BaseTask {
 
       const depth = this.input.browseDepth ?? 2;
 
-      // 进入主页后先停留几秒（真人打开页面先看一眼再开始刷）；可被被动蹲饼中断
-      this.log(`👀 进入主页，先停留浏览 ${(2 + Math.random() * 3).toFixed(1)}s…`);
+      // 先停留几秒（真人打开页面先看一眼再开始刷）；可被被动蹲饼中断
+      this.log(`👀 浏览主页，先停留浏览 ${(2 + Math.random() * 3).toFixed(1)}s…`);
       const initialDwell =
         new DwellTimeSampler(DEFAULT_BEHAVIOR_CONFIG.behavior.dwellTime).sample('home_feed') + 1500 + Math.random() * 1500;
       if (!(await ctrl.dwell(initialDwell))) {
@@ -126,14 +90,16 @@ export class BrowseHomeTask extends BaseTask {
       // 拟人滚动浏览推荐流（滚动参数：左边缘安全鼠标位 + 一屏距离，由管理器计算）
       const { mousePos, distance } = await MousePositionManager.instance.browseScrollParams(page);
       for (let i = 0; i < depth; i++) {
-        await new ScrollBehavior(mousePos, distance).execute(context);
+        await new ScrollBehavior(mousePos, distance, undefined, () => ctrl.aborted).execute(context);
         const screenDwell = new DwellTimeSampler(DEFAULT_BEHAVIOR_CONFIG.behavior.dwellTime).sample('home_feed');
         if (!(await ctrl.dwell(screenDwell))) {
           this.finishWith({ success: true, data: { interrupted: true, browseDepth: depth } }, MainState.HOME_FEED);
           return;
         }
-        if (i < depth - 1) {
-          await new SleepBehavior(800 + Math.random() * 1000).execute(context);
+        // 屏间小停顿：用 ctrl.dwell（可中断）而非 SleepBehavior（不可中断窗口）
+        if (i < depth - 1 && !(await ctrl.dwell(800 + Math.random() * 1000))) {
+          this.finishWith({ success: true, data: { interrupted: true, browseDepth: depth } }, MainState.HOME_FEED);
+          return;
         }
       }
 
@@ -146,7 +112,7 @@ export class BrowseHomeTask extends BaseTask {
       this.log(`✔ 刷首页推荐流完成（滚动 ${depth} 屏，收集 ${videos.length} 个视频）`);
 
       // 拟人回滚到顶部（真人刷完首页会自然滚回顶部/初始位置）
-      await new HumanScroller().scrollBackToTop(page).catch(() => {});
+      await new HumanScroller().scrollBackToTop(page, () => ctrl.aborted).catch(() => {});
 
       // 执行阶段结束：记录数据 + 声明落点（后一个状态由 onEnd 生成）
       this.finishWith({ success: true, data: { videos, count: videos.length } }, MainState.HOME_FEED);

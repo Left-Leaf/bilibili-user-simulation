@@ -12,6 +12,8 @@ import {
   collectVideoTargetLinks,
   extractVideoPageInfo,
   collectVideoEntries,
+  isPlayerFullscreen,
+  exitPlayerFullscreen,
   isVideoPageUrl,
   type VideoEntry,
 } from '../../utils/bilibili-dom';
@@ -54,6 +56,9 @@ export interface OpenVideoInput {
   /** 生成器定位收集的目标视频信息（跳转链接 + 基础信息），执行器据此定位点击 */
   targetInfo?: OpenVideoTargetInfo;
 }
+
+/** 点击后等待「新标签页 / 当前页导航」的轮询次数（20 × 600ms = 12s 上限） */
+const CLICK_WAIT_ROUNDS = 20;
 
 export class OpenVideoTask extends BaseTask {
   constructor(private input: OpenVideoInput = {}) {
@@ -209,6 +214,7 @@ export class OpenVideoTask extends BaseTask {
    *    → scrollIntoView 居中 → getClientRects 首块中心落点 → 深层懒加载兜底 handle.click）
    * 3. 纯坐标拟人点击（LeftClickBehavior；已兜底点击则跳过）
    * 4. 等待/捕获新视频页（target=_blank 开新标签；或当前页导航，按 bvid 精确校验防连刷假成功）
+   *    ⚠️ **只采纳「点击后新出现」的目标视频页**（点击前先快照旧视频标签，见 snapshotStaleVideoPages）
    * 5. 连刷时关闭旧视频标签，避免标签堆积
    */
   private async openVideoEntry(
@@ -223,6 +229,18 @@ export class OpenVideoTask extends BaseTask {
     if (this.input.targetInfo?.linkHrefs?.length) {
       this.log(`🔗 目标视频跳转链接 ${this.input.targetInfo.linkHrefs.length} 个（生成器定位）`);
     }
+    // 0) 防御：页面若还停在播放器全屏（卡片/推荐栏被播放器盖住，坐标算得出但点击会落空）
+    //    → 先退出全屏再点（WatchVideo 也会在收尾退出，这里是双保险）
+    if (await isPlayerFullscreen(page).catch(() => false)) {
+      this.log('🪟 页面仍在播放器全屏 → 先退出全屏再点击');
+      await exitPlayerFullscreen(page).catch(() => {});
+      await new SleepBehavior(400 + Math.random() * 400).execute(context).catch(() => {});
+    }
+    // 0.5) 快照「点击前已存在的视频页」= 历史遗留旧视频标签。
+    //    ⚠️ 必须在点击**之前**取快照：否则等待阶段会把旧标签当成「本次点击新开的标签」采纳，
+    //    表现为「慢一拍」——实际播放的是**上一次**的目标视频（实测 run-15：
+    //    目标 BV1TctC6zEX4 却采纳了 BV1kRt36GEG9，目标 BV1TC3h6eEoY 却采纳了 BV1TctC6zEX4）。
+    const staleVideoPages = await this.snapshotStaleVideoPages(context);
     // 1) 精确定位「标题卡片」handle（确认目标存在 + 作为滚动/兜底锚点）
     const entryHandle = await findVideoEntryHandle(page, entry.bvid);
     if (!entryHandle) {
@@ -258,23 +276,36 @@ export class OpenVideoTask extends BaseTask {
       }
     }
 
-    // 4) 等待并捕获新视频标签页（视频链接 target=_blank 开新标签）
-    const videoPage = await this.findVideoPage(context);
-    if (videoPage) {
+    // 4) 等待点击结果：新视频标签页（target=_blank）或**当前页 SPA 导航**到目标视频
+    const result = await this.waitClickResult(context, entry.bvid, staleVideoPages);
+    if (result.kind === 'new-tab') {
       // 连刷（在视频页点推荐）→ 关闭旧视频标签页，避免标签堆积
       if (inVideoPage && isVideoPageUrl(page.url())) {
         await page.close().catch(() => {});
         this.log(`🗑️ 关闭旧视频标签: ${pageUrl.slice(0, 60)}`);
       }
-      context.page = videoPage;
-      this.log(`📑 捕获到新标签页: ${videoPage.url().slice(0, 70)}`);
+      // 历史遗留的旧视频标签一并清掉：此刻它们已无任务在用（本任务的操作页是 currentPage，
+      // 且马上要切到 result.page），留着只会让后续「新标签 vs 旧标签」继续产生歧义
+      // （旧标签残留正是缺陷 (B) 的土壤：CloseVideo 也可能关错页）。
+      for (const stale of staleVideoPages) {
+        if (stale.isClosed() || stale === result.page) {
+          continue;
+        }
+        const staleBv = bvFromUrl(stale.url()) || '无BV';
+        await stale.close().catch(() => {});
+        this.log(`🗑️ 清理历史遗留视频标签: ${staleBv}`);
+      }
+      context.page = result.page;
+      this.log(`📑 捕获到新标签页: ${result.page.url().slice(0, 70)}`);
+    } else if (result.kind === 'same-page') {
+      // 部分链接是当前页直接导航（非 target=_blank），当前页已是目标视频页
+      this.log('📄 视频页（当前页导航）');
     } else if (isVideoPageUrl(context.page!.url())) {
-      // 连刷（有 target）时校验当前页 bvid === 目标 bvid：URL 可能因 vd_source 等参数变化串不同
-      // 但仍是旧视频，整串比较会误判「已导航」→ 用 bvid 精确校验，避免连刷假成功（还在旧视频）
+      // 当前页已是视频页但 bvid 不是目标（连刷点了别的卡片 / 点击落空）→ 失败。
+      // URL 可能因 vd_source 等参数变化串不同，用 bvid 精确校验，避免连刷假成功（还在旧视频）。
       if (this.input.target && bvFromUrl(context.page!.url()) !== this.input.target.bvid) {
         throw new Error(`点击推荐视频后未切换到目标视频（当前 ${context.page!.url().slice(0, 60)}）`);
       }
-      // 部分链接是当前页直接导航（非 target=_blank），当前页已是视频页
       this.log('📄 视频页（当前页导航）');
     } else {
       // 点击后未开新标签也未导航（被前端拦截等）→ 打开失败，交给生成器（超阈值后走下一任务）
@@ -346,25 +377,85 @@ export class OpenVideoTask extends BaseTask {
     return { pageUrl, pageTitle, selector, videoLinkCount };
   }
 
-  /** 在所有标签页中查找「真正的新视频页」（点击 target=_blank 打开的新标签） */
-  private async findVideoPage(context: TaskContext): Promise<NonNullable<TaskContext['page']> | null> {
+  /**
+   * 快照「当前页以外、已存在的视频页」——它们是历史遗留的旧视频标签，
+   * **本轮绝不**能把它们当成「本次点击新开的标签」采纳（见 `waitClickResult` 的 `stalePages`）。
+   *
+   * 顺便把「存在几个旧视频标签」写进日志：旧标签残留是标签泄漏的信号（如 CloseVideo 没关干净），
+   * 而泄漏一旦发生，修复前的实现就会每次「慢一拍」。
+   */
+  private async snapshotStaleVideoPages(context: TaskContext): Promise<Set<Page>> {
+    const stale = new Set<Page>();
     const browser = context.browser;
-    if (!browser) {
-      return null;
+    const currentPage = context.page;
+    if (!browser || !currentPage) {
+      return stale;
+    }
+    const pages = await browser.pages().catch(() => [] as Page[]);
+    for (const p of pages) {
+      if (p === currentPage || p.isClosed()) {
+        continue;
+      }
+      if (isVideoPageUrl(p.url())) {
+        stale.add(p);
+      }
+    }
+    if (stale.size > 0) {
+      const bvs = [...stale].map((p) => bvFromUrl(p.url()) || '无BV').join('、');
+      this.log(`🧷 点击前已存在 ${stale.size} 个旧视频标签（${bvs}）→ 本轮不会把它们当新标签采纳`);
+    }
+    return stale;
+  }
+
+  /**
+   * 等待点击结果：新视频标签页（target=_blank）或**当前页 SPA 导航**到目标视频。
+   *
+   * 与旧实现的区别：旧实现只轮询「新标签页」最多 12 秒，而视频页右侧推荐栏链接是
+   * **当前页 SPA 导航**（不开新标签）→ 连刷每次都白等满 12 秒才走 else 分支。
+   * 现在同时检查当前页是否已导航到目标 bvid，命中即返回（连刷从 ~12s 降到 ~1~2s）。
+   *
+   * ⚠️ 判定顺序与过滤条件是本函数的**关键正确性约束**（实测缺陷 (B)）：
+   * 1. **先**看当前页是否已 SPA 导航到目标 bvid —— 必须排在采纳新标签之前，
+   *    否则连刷（同页导航）会先被「另一个已存在的视频标签」抢走；
+   * 2. 采纳新标签时，必须排除 `stalePages`（点击前就存在的旧视频标签），
+   *    且要求 bvid 与目标**精确一致** —— 否则会把历史遗留的旧标签当成本次结果，
+   *    静默播放上一次的目标视频（“慢一拍”）。
+   */
+  private async waitClickResult(
+    context: TaskContext,
+    expectedBvid: string,
+    /** 点击**前**就已存在的视频页（旧标签）集合：它们不是本次点击的产物，不可采纳 */
+    stalePages: ReadonlySet<Page> = new Set<Page>()
+  ): Promise<{ kind: 'new-tab'; page: NonNullable<TaskContext['page']> } | { kind: 'same-page' } | { kind: 'none' }> {
+    const browser = context.browser;
+    const currentPage = context.page;
+    if (!browser || !currentPage) {
+      return { kind: 'none' };
     }
     // 用「页面对象引用」排除当前页（而非 URL 比较）：同页导航（SPA）时当前页 URL 会变成目标，
     // 若用 URL 比较会把当前页自己误判为「新标签」，随后被 close() 关闭 → 所有标签消失（实测）。
-    const currentPage = context.page;
-    // 轮询最多 12 秒（20 次 × 600ms）：B 站新标签页懒加载/网络慢时延迟出现，延长轮询降低偶发「未进入视频页」失败
-    for (let i = 0; i < 20; i++) {
+    for (let i = 0; i < CLICK_WAIT_ROUNDS; i++) {
+      // ① 当前页已 SPA 导航到目标 bvid（连刷主路径）
+      const url = currentPage.url();
+      if (isVideoPageUrl(url) && (!expectedBvid || bvFromUrl(url) === expectedBvid)) {
+        return { kind: 'same-page' };
+      }
+      // ② 是否出现**本次点击新开**的目标视频标签页
       const pages = await browser.pages().catch(() => [] as NonNullable<TaskContext['page']>[]);
       for (const p of pages) {
-        if (p !== currentPage && isVideoPageUrl(p.url())) {
-          return p;
+        if (p === currentPage || stalePages.has(p) || p.isClosed()) {
+          continue; // 当前页 / 点击前就存在的旧标签 → 不是本次点击的产物
         }
+        if (!isVideoPageUrl(p.url())) {
+          continue;
+        }
+        if (expectedBvid && bvFromUrl(p.url()) !== expectedBvid) {
+          continue; // 不是目标视频（可能还在导航中 / 点错了卡片）→ 继续等
+        }
+        return { kind: 'new-tab', page: p };
       }
       await this.sleepReal(600);
     }
-    return null;
+    return { kind: 'none' };
   }
 }

@@ -31,6 +31,9 @@ export function restAffinity(taskName: string | undefined): number {
       return 0.4;
     // 很不自然：动作未完成感强，休息概率特别低
     case 'OpenVideo':
+    case 'OpenDynamic':
+    case 'OpenHome':
+    case 'OpenProfile':
     case 'Search':
     case 'CloseVideo':
       return 0.15;

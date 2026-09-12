@@ -14,7 +14,13 @@ export class ScrollBehavior extends BaseBehavior {
   constructor(
     private mousePos: Point,
     private distance: number,
-    private config: HumanBehaviorConfig = DEFAULT_BEHAVIOR_CONFIG
+    private config: HumanBehaviorConfig = DEFAULT_BEHAVIOR_CONFIG,
+    /**
+     * 中断检查（可选）：返回 true 则立即停止滚动。
+     * **持续性任务必须传入**（`() => ctrl.aborted`）—— 滚动内部会连发滚轮事件，
+     * 不传就是一个最长达 ~20s 的不可中断窗口，会让中止宽限超时、主体被强制结束。
+     */
+    private shouldStop?: () => boolean
   ) {
     super('Scroll');
   }
@@ -26,7 +32,7 @@ export class ScrollBehavior extends BaseBehavior {
       return this.fail('页面未打开');
     }
     try {
-      await new HumanScroller(this.config).humanScroll(page, this.mousePos, this.distance);
+      await new HumanScroller(this.config).humanScroll(page, this.mousePos, this.distance, this.shouldStop);
       return this.ok({ mousePos: this.mousePos, distance: this.distance });
     } catch (error) {
       return this.fail(`滚动失败: ${(error as Error).message}`);
