@@ -1,11 +1,11 @@
 import type { TaskContext } from '../execute/context';
 import { BaseBehavior, type BehaviorResult } from './types';
 import { extractLoginQrInfo } from './extract-login-qr';
-import { convertQrToTerminalString } from '../../utils/terminal-qr';
+import { publishLoginQr } from '../../business/login-qr';
 
 /**
  * 扫码登录（原子行为）：等待登录弹窗中的二维码出现，
- * 提取二维码并打印到终端（无头模式可扫码），返回给任务层做登录判定。
+ * 提取二维码并**发布**（终端打印 + 对外通道，见 `publishLoginQr`），返回给任务层做登录判定。
  */
 export class ScanQrBehavior extends BaseBehavior {
   constructor(private timeoutMs = 30000) {
@@ -33,19 +33,9 @@ export class ScanQrBehavior extends BaseBehavior {
         )
         .catch(() => null);
 
+      // 提取二维码并发布（终端打印 + 对外通道）——输出细节统一在 publishLoginQr，本行为不关心
       const qrInfo = await extractLoginQrInfo(page).catch(() => null);
-      if (qrInfo) {
-        const qrText = await convertQrToTerminalString(qrInfo).catch(() => null);
-        if (qrText) {
-          console.log('\n=== Bilibili 登录二维码 ===\n');
-          console.log(qrText);
-          console.log('\n请使用手机 Bilibili App 扫码登录。\n');
-        } else {
-          console.log('\n📱 请在浏览器窗口中扫描二维码完成登录\n');
-        }
-      } else {
-        console.log('\n📱 请在浏览器窗口中扫描二维码完成登录\n');
-      }
+      await publishLoginQr(qrInfo).catch(() => null);
       return this.ok();
     } catch (error) {
       return this.fail(`扫码失败: ${(error as Error).message}`);

@@ -44,6 +44,13 @@ await kernel.initialize({
   headless: true,
   personaId,
   personaDir, // 主项目自己的人格目录（personaId = 该目录下的文件名）
+  // 登录二维码对外输出：无头模式下二维码除终端打印外，也回调到这里（宿主可自行渲染）
+  onQrcode: (qr) => {
+    const kind = qr.imageBase64 ? `图片 ${Math.round(qr.imageBase64.length / 1024)}KB` : '链接';
+    console.log(
+      `[${fmtTime()}] [内核] 收到登录二维码（${kind}）${qr.url ? `｜链接 ${qr.url.slice(0, 60)}` : ''}`
+    );
+  },
 });
 
 // 可选：列出该人格目录下所有可用人格（文件名即 personaId）

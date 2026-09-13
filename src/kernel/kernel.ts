@@ -7,7 +7,7 @@
  *   3. 模拟行为：`startSimulation()` / `stopSimulation()`（控制任务生成器与执行器；**无暂停态**）
  *   4. 动态获取：`startFetch()`（打开动态页并监听更新）/ `stopFetch()`（取消监听并关闭标签页）
  *   5. 动态监听器：`createDynamicListener(cb)` → 订阅器（`cancel()` 取消订阅）
- *   6. 登录：`login()` / `logout()`
+ *   6. 登录：`login()` / `logout()`（扫码二维码除打印到控制台外，可按 `onQrcode` 回调对外输出）
  *   （另有 `followUp()` 主动关注 UP，独立于任务流）
  *
  * ```ts
@@ -15,6 +15,7 @@
  *
  * await kernel.initialize({ headless: true, personaId: 'ak-night-worker' }); // ① 初始化
  * const sub = kernel.createDynamicListener((items, kind) => {});             // ② 订阅动态
+ * // 扫码二维码对外输出（可选）：initialize({ …, onQrcode }) 或 login({ onQrcode })
  * await kernel.startFetch();        // ③ 打开动态获取
  * await kernel.startSimulation();   // ④ 打开模拟行为
  * ...
@@ -55,6 +56,8 @@ import {
 } from '../business/passive-fetch.js';
 import type { BiliDynamicItem, DynamicListener, InitialFetchOutcome } from '../business/passive-fetch.js';
 import { EXCLUSIVE_TASKS, fetchCoordinator } from '../business/fetch-coordinator.js';
+import { setLoginQrHandler } from '../business/login-qr.js';
+import type { LoginQrHandler, LoginQrPayload } from '../business/login-qr.js';
 import { followUpOnPage, type FollowUpResult, type FollowUpTarget } from '../business/follow-up.js';
 import { isVideoPageUrl } from '../utils/bilibili-dom.js';
 import { installPageRuntimeShim } from '../utils/page-runtime.js';
@@ -123,8 +126,24 @@ export interface KernelPersonaSource {
   persona?: PersonaConfig;
 }
 
+/**
+ * 登录相关选项（`login()` 与 `initialize()` 共用）：
+ * 扫码二维码除打印到控制台外，还可通过回调交给宿主（如在自己的界面里渲染二维码）。
+ */
+export interface KernelLoginOptions {
+  /**
+   * 登录二维码回调（可选）：扫码阶段每发布一张二维码调用一次，与终端打印**并列**。
+   *
+   * - `qr.imageBase64` 可直接交给图片控件渲染；`qr.url` 是二维码实际表示的登录链接；
+   * - **一次登录可能调用多次**（首次 + 二维码过期自动刷新后重打）→ 用 `qr.fingerprint` 判断是否换了新码；
+   * - 回调抛错不影响登录流程（内核记一条警告后忽略）；
+   * - 不传时不做任何额外转换（仅终端打印）。
+   */
+  onQrcode?: LoginQrHandler;
+}
+
 /** 内核初始化选项 */
-export interface KernelInitializeOptions extends KernelPersonaSource {
+export interface KernelInitializeOptions extends KernelPersonaSource, KernelLoginOptions {
   /** 无头模式（默认 true） */
   headless?: boolean;
   /** 浏览器用户数据目录（默认 包根/puppeteer-browser/data） */
@@ -265,6 +284,7 @@ export class SimulationKernel {
    * - 幂等：已初始化且浏览器仍在连接时直接返回；
    * - 登录态有效（持久化 cookie）时自动跳过扫码；
    * - 登录态无效时打印二维码并阻塞等待扫码（`waitForLogin: false` 则不等待）；
+   *   二维码除终端打印外，也可通过 `options.onQrcode` 交给宿主（如自己渲染到界面上）；
    * - **不启动任何功能**：模拟行为与蹲饼都要再显式调用 start* 打开。
    */
   async initialize(options: KernelInitializeOptions = {}): Promise<this> {
@@ -302,7 +322,8 @@ export class SimulationKernel {
     ctx.state.set('preventBrowserClose', true);
 
     this.initialized = true;
-    this.loggedIn = await this.ensureLoggedIn();
+    // 未登录时阻塞等扫码 —— 二维码除终端打印外，也可通过 options.onQrcode 交给宿主渲染
+    this.loggedIn = await this.withQrcodeHandler(options.onQrcode, () => this.ensureLoggedIn());
 
     this.log(
       this.loggedIn
@@ -350,11 +371,16 @@ export class SimulationKernel {
     return persona;
   }
 
-  /** 确保登录（未登录则执行登录任务并等待扫码）。
+  /**
+   * 确保登录（未登录则执行登录任务并等待扫码）。
    * 与 `initialize()` 内置的登录等待一致，供随时手动调用（如登录态失效后，或 `waitForLogin: false` 初始化后补登录）。
+   *
+   * 扫码二维码除打印到控制台外，也可通过 `options.onQrcode` 回调交给宿主
+   * （一次登录可能回调多次，用 `qr.fingerprint` 判断是否换了新码）。
+   *
    * @returns 是否已处于登录态
    */
-  async login(): Promise<boolean> {
+  async login(options: KernelLoginOptions = {}): Promise<boolean> {
     this.assertInitialized();
     // 登录是最高优先级任务（额外任务，不走模拟循环）：**首先关闭蹲饼与模拟**，再执行登录
     // （stopFetch 内部会等在跑的蹲饼会话让出浏览器）
@@ -362,7 +388,7 @@ export class SimulationKernel {
     await this.stopSimulation().catch(() => {});
     // 模拟停止后会清理页面（蹲饼已关则全关）→ 重建可用页，否则 ensureLoggedIn 因无页面直接返回 false
     await this.ensureUsablePage().catch(() => {});
-    this.loggedIn = await this.ensureLoggedIn(true);
+    this.loggedIn = await this.withQrcodeHandler(options.onQrcode, () => this.ensureLoggedIn(true));
     return this.loggedIn;
   }
 
@@ -606,7 +632,7 @@ export class SimulationKernel {
     );
   }
 
-  /** 把捕获到的动态分发给全部订阅者（单个回调抛错不影响其它订阅） */
+  /** 将捕获到的动态分发给全部订阅者（单个回调抛错不影响其它订阅） */
   private dispatchDynamics(items: BiliDynamicItem[], kind: 'INIT' | 'UPDATE'): void {
     for (const listener of [...this.dynamicListeners]) {
       try {
@@ -614,6 +640,33 @@ export class SimulationKernel {
       } catch (error) {
         this.log(`⚠️ 动态监听回调出错: ${(error as Error).message}`);
       }
+    }
+  }
+
+  // ===== 登录二维码输出（对外通道） =====
+
+  /**
+   * 在登录流程期间接入二维码回调（`login({ onQrcode })` / `initialize({ onQrcode })` 内部使用）。
+   *
+   * - 不传回调 → 直接执行（终端打印照常，不做多余转换）；
+   * - 流程结束 / 抛异常 → `finally` 里自动摘除，不残留到下一次登录；
+   * - 回调抛错 → 只记一条警告，**不影响登录流程**（回调与终端打印同处一次发布）。
+   */
+  private async withQrcodeHandler<T>(handler: LoginQrHandler | undefined, fn: () => Promise<T>): Promise<T> {
+    if (!handler) {
+      return fn();
+    }
+    setLoginQrHandler((qr) => {
+      try {
+        handler(qr);
+      } catch (error) {
+        this.log(`⚠️ 登录二维码回调出错: ${(error as Error).message}`);
+      }
+    });
+    try {
+      return await fn();
+    } finally {
+      setLoginQrHandler(null);
     }
   }
 

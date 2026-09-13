@@ -26,10 +26,14 @@ export { SimulationKernel, kernel } from './kernel/kernel.js';
 export type {
   KernelPersonaSource,
   KernelInitializeOptions,
+  KernelLoginOptions,
   KernelFetchOptions,
   KernelFollowUpOptions,
   DynamicSubscription,
 } from './kernel/kernel.js';
+
+// 登录二维码对外输出（扫码时除打印到控制台外，也按 login({ onQrcode }) 的回调交给宿主）
+export type { LoginQrPayload, LoginQrHandler } from './business/login-qr.js';
 
 // 动态监听（被动蹲饼捕获出口）
 export { setDynamicListener } from './business/passive-fetch.js';

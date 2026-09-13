@@ -334,29 +334,29 @@ const buildAsciiFromPixels = (rgba: Uint8Array | Buffer, width: number, height: 
  *  - 再用 qrcode-terminal 把链接编码回终端二维码（保证正方形比例、黑白高对比、可扫码）。
  * 直接对图片做像素字符画（buildAsciiFromPixels）在模块边界为亚像素时不可靠，仅作为兜底。
  */
-const renderBase64ImageToQr = async (data: string): Promise<string | null> => {
+const renderBase64ImageToQr = async (data: string): Promise<{ link: string | null; terminal: string | null }> => {
   const base64 = data.startsWith('data:') ? data.slice(data.indexOf(',') + 1) : data;
   const buffer = Buffer.from(base64, 'base64');
   if (buffer.length === 0) {
-    return null;
+    return { link: null, terminal: null };
   }
 
   const png = decodePng(buffer);
   if (!png) {
-    return null;
+    return { link: null, terminal: null };
   }
 
   const rgba = new Uint8ClampedArray(png.rgba.buffer, png.rgba.byteOffset, png.rgba.byteLength);
   try {
     const decoded = jsQR(rgba, png.width, png.height);
     if (decoded?.data) {
-      return await encodeLinkToQr(decoded.data);
+      return { link: decoded.data, terminal: await encodeLinkToQr(decoded.data) };
     }
   } catch {
     // 解码失败则走像素兜底
   }
 
-  return buildAsciiFromPixels(png.rgba, png.width, png.height);
+  return { link: null, terminal: buildAsciiFromPixels(png.rgba, png.width, png.height) };
 };
 
 /** 二维码实际表示的链接字符串 -> 字符串二维码（编码回 QR 输出到终端） */
@@ -366,6 +366,24 @@ const encodeLinkToQr = (url: string): Promise<string> =>
   });
 
 /**
+ * 把二维码输入转成「它实际表示的链接」+「可打印的终端字符串二维码」——
+ * **只解码一次**，两个输出共用同一次解码结果（对外通道与终端打印都靠它）。
+ *
+ * - `link`：图片走 jsqr 解码得到链接；`type: 'link'` 输入直接返回自身；解不出为 `null`
+ *   （图片可能只有像素兜底可用，或根本不是二维码）。
+ * - `terminal`：可打印的字符串二维码（解码成功用 qrcode-terminal 重新编码，保证正方形比例；
+ *   解码失败回退到像素字符画）。
+ */
+export async function convertQrForOutput(
+  input: QrTerminalInput
+): Promise<{ link: string | null; terminal: string | null }> {
+  if (input.type === 'link') {
+    return { link: input.url, terminal: await encodeLinkToQr(input.url) };
+  }
+  return renderBase64ImageToQr(input.data);
+}
+
+/**
  * 把二维码转换为可打印到终端的字符串二维码。
  *
  * 仅接受两种输入（见 {@link QrTerminalInput}）：
@@ -373,8 +391,5 @@ const encodeLinkToQr = (url: string): Promise<string> =>
  *  - 二维码实际表示的链接字符串
  */
 export async function convertQrToTerminalString(input: QrTerminalInput, _options: QrConversionOptions = {}): Promise<string | null> {
-  if (input.type === 'link') {
-    return encodeLinkToQr(input.url);
-  }
-  return renderBase64ImageToQr(input.data);
+  return (await convertQrForOutput(input)).terminal;
 }

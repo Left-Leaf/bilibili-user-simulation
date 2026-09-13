@@ -4,7 +4,7 @@ import { MainState } from '../engine/state';
 import { OpenBrowserBehavior, NavigateBehavior, MouseMoveBehavior, LeftClickBehavior, ScanQrBehavior, SleepBehavior } from '../behavior';
 import { MousePositionManager } from '../engine/mouse-position-manager';
 import { extractLoginQrInfo } from '../behavior/extract-login-qr';
-import { convertQrToTerminalString } from '../../utils/terminal-qr';
+import { publishLoginQr } from '../../business/login-qr';
 
 const LOGIN_ENTRY_SELECTORS = [
   '.header-login-entry', // 右上角登录入口
@@ -75,21 +75,13 @@ export class LoginTask extends BaseTask {
       .catch(() => {});
   }
 
-  /** 提取并打印二维码到终端；返回其指纹（内容串，用于比对是否过期/换码） */
+  /**
+   * 提取并**发布**二维码（终端打印 + 对外通道，见 `publishLoginQr`）；
+   * 返回其指纹（内容串，用于比对是否过期/换码）。
+   */
   private async printQrCode(page: NonNullable<TaskContext['page']>): Promise<string | null> {
     const qi = await extractLoginQrInfo(page, 8000).catch(() => null);
-    const fp = qi ? ('data' in qi ? String(qi.data) : 'url' in qi ? qi.url : null) : null;
-    if (qi) {
-      const qrText = await convertQrToTerminalString(qi).catch(() => null);
-      if (qrText) {
-        console.log('\n=== Bilibili 登录二维码 ===\n');
-        console.log(qrText);
-        console.log('\n请使用手机 Bilibili App 扫码登录。\n');
-      } else {
-        console.log('\n📱 请在浏览器窗口中扫描二维码完成登录\n');
-      }
-    }
-    return fp;
+    return publishLoginQr(qi).catch(() => null);
   }
 
   /** 探测当前弹窗二维码状态：指纹 + 是否已过期（容器内无有效码且出现失效/刷新字样） */
