@@ -27,7 +27,7 @@ npm run start -- <personaId> <personaDir>                # 指定人格目录（
 npm run start -- <personaId> <personaDir> <baselineTs>   # 指定增量基线（上次 stopFetch() 的返回值）
 ```
 
-启动流程：打开浏览器 → 未登录则等待扫码（持久化登录态有效时自动跳过）→
+启动流程：打开浏览器 → `login()` 未登录则等待扫码（持久化登录态有效时自动跳过）→
 `startFetch()` 打开蹲饼 → `startSimulation()` 打开模拟行为 → 持续运行直到 `Ctrl+C`；
 退出时会关闭蹲饼并打印**本次最终基线**。
 
@@ -79,7 +79,9 @@ await kernel.login({
   },
 });
 await kernel.logout();
-// 注：`initialize({ …, onQrcode })` 也接受同一个回调（默认 waitForLogin: true 时，扫码发生在 initialize 内）
+// 注：二维码**只有 login() 一个出口**（initialize() 不接受 onQrcode）。
+//     若想在初始化阶段就把二维码交给宿主渲染：
+//     await kernel.initialize({ waitForLogin: false }); await kernel.login({ onQrcode });
 
 // 另有：主动关注 UP（独立操作，全部在临时标签页完成，不中断当前任务流）
 await kernel.followUp('161775300'); // → { uid, name, status: 'followed' | 'now-followed' | 'failed' }
@@ -89,7 +91,7 @@ await kernel.followUp('161775300'); // → { uid, name, status: 'followed' | 'no
 
 | 接口 | 说明 |
 | --- | --- |
-| `initialize(options)` | 打开浏览器并确保登录，**不启动任何功能**。`headless`（默认 `true`）+ `userDataDir` / `browserArgs` / `waitForLogin`（默认 `true`）/ `verbose` 等，以及人格来源；`onQrcode` 见下方；详见 `KernelInitializeOptions` |
+| `initialize(options)` | 打开浏览器并确保登录，**不启动任何功能**。`headless`（默认 `true`）+ `userDataDir` / `browserArgs` / `waitForLogin`（默认 `true`）/ `verbose` 等，以及人格来源；详见 `KernelInitializeOptions`（**不含** `onQrcode`） |
 | `destroy()` | 停止模拟与蹲饼、关闭浏览器、清除初始化信息与全部订阅（可再次 `initialize()`） |
 | `loadPersona(options)` | 加载或**运行态热替换**人格配置（立即生效，不打断任务流） |
 | `listPersonas()` | 列出当前人格目录下全部可用人格（`personaId` = 文件名） |
@@ -97,7 +99,7 @@ await kernel.followUp('161775300'); // → { uid, name, status: 'followed' | 'no
 | `startFetch(options)` | 打开动态页并监听更新。`baselineTs` = 增量基线（秒）；`initialTimeoutMs`（默认 25000）；`watchdogIntervalMs`（默认 60000）。返回是否「已覆盖基线」 |
 | `stopFetch()` | 取消监听并关闭动态页标签；**返回本次最终基线**（秒），保存后下次传给 `startFetch` 即可无缝续接 |
 | `createDynamicListener(cb)` | 创建动态监听器，返回订阅器（`active` / `cancel()`） |
-| `login(opts)` / `logout()` | 登录（未登录则等待扫码）/ 退出登录（浏览器保持打开）。`opts.onQrcode` = 登录二维码回调（可选）：扫码时二维码**除打印到控制台外**也回调 `{ url?, imageBase64?, fingerprint, at }`；一次登录可能回调多次（二维码过期换新），用 `fingerprint` 判断是否换了新码。回调抛错不影响登录（只记警告） |
+| `login(opts)` / `logout()` | 登录（未登录则等待扫码）/ 退出登录（浏览器保持打开）。`opts.onQrcode` = 登录二维码回调（可选，**仅此处可传**）：扫码时二维码**除打印到控制台外**也回调 `{ url?, imageBase64?, fingerprint, at }`；一次登录可能回调多次（二维码过期换新），用 `fingerprint` 判断是否换了新码。回调抛错不影响登录（只记警告） |
 | `followUp(uid, opts)` | 主动关注 UP。`holdTasks`（默认 `true`）= 这几秒内暂停派发新任务，避免与本操作竞争标签页 |
 
 人格来源优先级：`persona`（直接传对象）> `personaFile`（文件路径）> `personaDir` + `personaId`。
@@ -109,7 +111,9 @@ await kernel.followUp('161775300'); // → { uid, name, status: 'followed' | 'no
 - **蹲饼开启期间不会产生长休息**：长休息会关闭浏览器 / 长时间停止活动，会让蹲饼失效 ——
   开启蹲饼时生成侧直接不采样该状态（若此刻正在长休息，会先把它停掉）。
 - `login()` / `logout()` 会**先关蹲饼、再关模拟**，然后独占浏览器执行登录 / 登出。
-- 扫码二维码有**两条输出**：控制台打印 + `onQrcode` 回调（`login()` 与 `initialize()` 都接受）。
+- 扫码二维码有**两条输出**：控制台打印 + `onQrcode` 回调，而回调**只能通过 `login({ onQrcode })` 传入** ——
+  `initialize()` 不接受它（内置的登录等待只打印到控制台）；想在初始化阶段就把二维码交给宿主渲染，
+  用 `initialize({ waitForLogin: false })` 初始化后再显式 `login({ onQrcode })`。
   回调只在**登录流程期间**有效（流程结束自动摘除），所以不需要注册/取消订阅。
 - **基线不落盘**：库不写任何基线文件，基线由宿主自己保存（`stopFetch()` 的返回值，
   或已收到动态里 `pub_ts` 的最大值）。

@@ -15,7 +15,7 @@
  *
  * await kernel.initialize({ headless: true, personaId: 'ak-night-worker' }); // ① 初始化
  * const sub = kernel.createDynamicListener((items, kind) => {});             // ② 订阅动态
- * // 扫码二维码对外输出（可选）：initialize({ …, onQrcode }) 或 login({ onQrcode })
+ * // 扫码二维码对外输出（可选，仅 login）：login({ onQrcode })
  * await kernel.startFetch();        // ③ 打开动态获取
  * await kernel.startSimulation();   // ④ 打开模拟行为
  * ...
@@ -127,8 +127,12 @@ export interface KernelPersonaSource {
 }
 
 /**
- * 登录相关选项（`login()` 与 `initialize()` 共用）：
+ * 登录选项（**仅 `login()`**）：
  * 扫码二维码除打印到控制台外，还可通过回调交给宿主（如在自己的界面里渲染二维码）。
+ *
+ * 注：`initialize()` **不接受** `onQrcode`；需要在初始化阶段就把二维码交给宿主渲染时，
+ * 用 `initialize({ waitForLogin: false })` 初始化后再显式 `login({ onQrcode })`
+ * —— 二维码只有一个出口，不会出现「同一个回调挂在两处」的歧义。
  */
 export interface KernelLoginOptions {
   /**
@@ -143,7 +147,7 @@ export interface KernelLoginOptions {
 }
 
 /** 内核初始化选项 */
-export interface KernelInitializeOptions extends KernelPersonaSource, KernelLoginOptions {
+export interface KernelInitializeOptions extends KernelPersonaSource {
   /** 无头模式（默认 true） */
   headless?: boolean;
   /** 浏览器用户数据目录（默认 包根/puppeteer-browser/data） */
@@ -284,7 +288,8 @@ export class SimulationKernel {
    * - 幂等：已初始化且浏览器仍在连接时直接返回；
    * - 登录态有效（持久化 cookie）时自动跳过扫码；
    * - 登录态无效时打印二维码并阻塞等待扫码（`waitForLogin: false` 则不等待）；
-   *   二维码除终端打印外，也可通过 `options.onQrcode` 交给宿主（如自己渲染到界面上）；
+   *   ⚠️ 这一步的二维码**只打印到控制台**：需要交给宿主渲染时，请用 `waitForLogin: false`
+   *   初始化后显式 `await login({ onQrcode })`（二维码只有 `login()` 一个出口）；
    * - **不启动任何功能**：模拟行为与蹲饼都要再显式调用 start* 打开。
    */
   async initialize(options: KernelInitializeOptions = {}): Promise<this> {
@@ -322,8 +327,8 @@ export class SimulationKernel {
     ctx.state.set('preventBrowserClose', true);
 
     this.initialized = true;
-    // 未登录时阻塞等扫码 —— 二维码除终端打印外，也可通过 options.onQrcode 交给宿主渲染
-    this.loggedIn = await this.withQrcodeHandler(options.onQrcode, () => this.ensureLoggedIn());
+    // 未登录时阻塞等扫码（二维码只打印到控制台；要交给宿主渲染请改用 login({ onQrcode })）
+    this.loggedIn = await this.ensureLoggedIn();
 
     this.log(
       this.loggedIn
@@ -646,7 +651,7 @@ export class SimulationKernel {
   // ===== 登录二维码输出（对外通道） =====
 
   /**
-   * 在登录流程期间接入二维码回调（`login({ onQrcode })` / `initialize({ onQrcode })` 内部使用）。
+   * 在登录流程期间接入二维码回调（`login({ onQrcode })` 内部使用）。
    *
    * - 不传回调 → 直接执行（终端打印照常，不做多余转换）；
    * - 流程结束 / 抛异常 → `finally` 里自动摘除，不残留到下一次登录；

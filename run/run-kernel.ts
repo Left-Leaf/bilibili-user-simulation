@@ -1,7 +1,8 @@
 /**
  * 内核（SimulationKernel）启动入口：初始化 → 订阅动态 → 打开两大功能 → 持续运行直到 Ctrl+C。
  *
- *   ① await kernel.initialize()            打开浏览器并登录（登录态有效则免扫码）
+ *   ① await kernel.initialize()            打开浏览器（waitForLogin:false，不阻塞等扫码）
+ *   ①′ await kernel.login({ onQrcode })    未登录时等扫码；二维码除终端打印外也回调给宿主
  *   ② kernel.createDynamicListener(cb)     订阅动态更新（返回订阅器）
  *   ③ await kernel.startFetch({ baselineTs? })  打开动态获取（蹲饼）
  *   ④ kernel.startSimulation()             打开模拟行为
@@ -37,14 +38,21 @@ console.log(`   人格目录: ${personaDir ?? '(包内 data/personas)'} | person
 console.log(
   `   增量基线: ${baselineTs ? new Date(baselineTs * 1000).toLocaleString('zh-CN', { hour12: false }) : '(未指定 → 当前时间，只投递开启后新产生的动态)'}`
 );
-console.log('   流程: initialize() → startFetch() → startSimulation()\n');
+console.log('   流程: initialize() → login() → startFetch() → startSimulation()\n');
 
-// ① 初始化：打开浏览器并登录（不启动任何功能）
+// ① 初始化：只打开浏览器，不启动任何功能
+//    这里显式 waitForLogin: false —— initialize() 内置的登录等待只会把二维码打印到控制台；
+//    要把二维码交给宿主自己渲染，就在下一步显式 login({ onQrcode })
 await kernel.initialize({
   headless: true,
   personaId,
   personaDir, // 主项目自己的人格目录（personaId = 该目录下的文件名）
-  // 登录二维码对外输出：无头模式下二维码除终端打印外，也回调到这里（宿主可自行渲染）
+  waitForLogin: false,
+});
+
+// ①′ 登录：未登录时阻塞等扫码（已登录则立即返回，不打印不回调）
+//    二维码对外输出：无头模式下除终端打印外，也回调到这里（宿主可自行渲染）
+await kernel.login({
   onQrcode: (qr) => {
     const kind = qr.imageBase64 ? `图片 ${Math.round(qr.imageBase64.length / 1024)}KB` : '链接';
     console.log(

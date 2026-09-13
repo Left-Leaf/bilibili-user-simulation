@@ -4,9 +4,15 @@
  * 背景：扫码登录时二维码原本只打印到控制台，**宿主进程（如 Flutter App）拿不到**，
  * 无法在自己的界面上呈现二维码。这里提供一个出口，让宿主**在调用登录时直接传回调**拿到二维码数据。
  *
- * 接入方式（内核）：把回调传给 `kernel.login({ onQrcode })` 或 `kernel.initialize({ onQrcode })`，
+ * 接入方式（内核）：把回调传给 `kernel.login({ onQrcode })` —— 这是**唯一**入口，
  * 内核在登录流程期间把它接到这里（流程结束 / 抛异常都自动摘除）。
- * 默认的「初始化时就阻塞等扫码」（`waitForLogin: true`）也在其中，因此 `initialize()` 期间扫码同样能收到。
+ *
+ * 注意：`initialize()` **不接受** `onQrcode`（它内置的登录等待只打印到控制台）。
+ * 若要在初始化阶段就把二维码交给宿主渲染：
+ * ```ts
+ * await kernel.initialize({ waitForLogin: false });
+ * await kernel.login({ onQrcode });
+ * ```
  *
  * ⚠️ 一次登录里二维码可能被发布多次（首次 + 过期自动刷新后重打），
  * 宿主用 `fingerprint` 判断「是不是换了新码」（内容不变 = 同一张码，不必重建界面）。
@@ -34,7 +40,7 @@ export type LoginQrHandler = (qr: LoginQrPayload) => void;
 let loginQrHandler: LoginQrHandler | null = null;
 
 /**
- * 接入 / 摘除登录二维码回调（内核在 `login()` / `initialize()` 的登录流程期间调用）；
+ * 接入 / 摘除登录二维码回调（内核在 `login()` 的登录流程期间调用）；
  * 传 `null` = 本次登录不对外输出（终端打印照常）。
  */
 export function setLoginQrHandler(handler: LoginQrHandler | null): void {
