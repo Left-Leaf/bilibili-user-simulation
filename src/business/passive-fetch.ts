@@ -30,6 +30,7 @@ import { isDynamicPageUrl } from '../utils/bilibili-dom';
 import { HumanMouse } from '../action/engine/human-mouse';
 import { HumanScroller } from '../action/engine/human-scroller';
 import { installPageRuntimeShim } from '../utils/page-runtime';
+import { clipText, sanitizeLoneSurrogates } from '../utils/text';
 
 /**
  * B 站动态流接口返回的**单条动态**（原样，字段与接口一致，不做任何裁剪/改名）。
@@ -133,7 +134,7 @@ export function dynText(item: BiliDynamicItem | null | undefined, maxLen = 200):
   if (!text) {
     text = `[${String(item?.type ?? '动态').replace('DYNAMIC_TYPE_', '')}]`;
   }
-  return text.slice(0, maxLen);
+  return clipText(text, maxLen); // 按完整字符截断：不会把 emoji 劈成孤立代理字符
 }
 
 /** 动态流接口前缀（初始 feed/all 与轮询 feed/all/update 共用） */
@@ -182,7 +183,10 @@ function deliverDynamics(items: BiliDynamicItem[], kind: 'INIT' | 'UPDATE'): voi
     const { uid, name } = dynAuthor(item);
     const ts = dynPubTs(item);
     const time = ts > 0 ? formatAbsTime(ts) : dynPubTimeText(item) || '（未知）';
-    console.log(`   - ${name || uid || '匿名'} [${time}]: ${(dynText(item) || '（无文案）').slice(0, 60)}`);
+    // 作者名来自 B 站接口（可能自带孤立代理字符）→ 清洗；正文按完整字符截断
+    console.log(
+      `   - ${sanitizeLoneSurrogates(name) || uid || '匿名'} [${time}]: ${clipText(dynText(item) || '（无文案）', 60)}`
+    );
   }
   if (items.length > 10) {
     console.log(`   … 其余 ${items.length - 10} 条省略`);

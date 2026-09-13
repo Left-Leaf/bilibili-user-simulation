@@ -4,6 +4,7 @@ import { MainState } from '../engine/state';
 import { LeftClickBehavior, TypeBehavior, KeyPressBehavior, ScrollBehavior, SleepBehavior } from '../behavior';
 import { MousePositionManager } from '../engine/mouse-position-manager';
 import { extractVideoPageInfo, extractComments, isVideoPageUrl } from '../../utils/bilibili-dom';
+import { clipText } from '../../utils/text';
 
 /** 拟人评论语料池（通用短句） */
 const COMMENT_POOL = [
@@ -73,7 +74,7 @@ export class CommentTask extends BaseTask {
       // 评论前：记录当前视频信息（标题 / UP），确认上下文
       const info = await extractVideoPageInfo(page).catch(() => null);
       if (info?.title) {
-        this.log(`📹 评论视频: 「${info.title.slice(0, 24)}」${info.upName ? `｜UP: ${info.upName}` : ''}`);
+        this.log(`📹 评论视频: 「${clipText(info.title, 24)}」${info.upName ? `｜UP: ${info.upName}` : ''}`);
       }
 
       // 确保已滚动到评论区（preCheck 可能已滚过，execute 再确认一次）
@@ -120,11 +121,11 @@ export class CommentTask extends BaseTask {
       let verified = false;
       const comments = await extractComments(page, 20).catch(() => null);
       if (comments?.comments?.length) {
-        const key = text.trim().slice(0, 8);
+        const key = clipText(text.trim(), 8);
         const hit = key ? comments.comments.find((c) => c.text && c.text.includes(key)) : undefined;
         if (hit) {
           verified = true;
-          this.log(`✅ 评论已发出: 「${hit.text.slice(0, 20)}」（${hit.author || '?'} ${hit.pubdate || '?'}）`);
+          this.log(`✅ 评论已发出: 「${clipText(hit.text, 20)}」（${hit.author || '?'} ${hit.pubdate || '?'}）`);
         }
       }
       if (!verified) {

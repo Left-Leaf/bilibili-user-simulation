@@ -4,6 +4,7 @@ import type { Page } from 'puppeteer-core';
 import { MainState } from '../engine/state';
 import { LeftClickBehavior, SleepBehavior } from '../behavior';
 import { MousePositionManager } from '../engine/mouse-position-manager';
+import { clipText } from '../../utils/text';
 import {
   bvFromUrl,
   pickVideoEntry,
@@ -128,21 +129,21 @@ export class OpenVideoTask extends BaseTask {
       // 当前是否已在视频页：决定目标来源（推荐流 vs 当前页）与是否关旧标签
       const inVideoPage = isVideoPageUrl(page.url());
       const pageUrl = page.url();
-      const pageTitle = await page
-        .title()
-        .catch(() => '')
-        .then((t) => t.slice(0, 40));
+      const pageTitle = clipText(
+        await page.title().catch(() => ''),
+        40
+      );
       this.log(`🖥️ 当前网页: ${pageTitle}(${pageUrl.slice(0, 70)})`);
 
       // 目标视频：优先用生成器概率计算器抉择的 target（来自视频页右侧推荐流）；
       // 否则从当前页用公共方法随机选一个可见视频入口
       let entry: VideoEntry | null = this.input.target ?? null;
       if (entry) {
-        this.log(`🎯 打开推荐视频: [${entry.bvid}]「${entry.title.slice(0, 30)}」（旧视频 ${pageUrl.slice(0, 50)}）`);
+        this.log(`🎯 打开推荐视频: [${entry.bvid}]「${clipText(entry.title, 30)}」（旧视频 ${pageUrl.slice(0, 50)}）`);
       } else {
         entry = await pickVideoEntry(page);
         if (entry) {
-          this.log(`🎯 目标视频: ${entry.title.slice(0, 40)}(${entry.href.slice(0, 60)}) [${entry.bvid}]`);
+          this.log(`🎯 目标视频: ${clipText(entry.title, 40)}(${entry.href.slice(0, 60)}) [${entry.bvid}]`);
         } else {
           this.log(`🎯 目标视频: 未找到（当前页无可见 /video/BV 链接）`);
         }
@@ -338,7 +339,7 @@ export class OpenVideoTask extends BaseTask {
       recommendations = await collectVideoEntries(page, 20);
     }
     this.log(
-      `▶ 已打开视频页: ${bvFromUrl(videoUrl) || '无BV'}「${title.slice(0, 24)}」总长 ${duration.toFixed(0)}s${pageInfo?.upName ? `｜UP: ${pageInfo.upName}` : ''}${pageInfo?.viewCount ? `｜播放 ${pageInfo.viewCount}` : ''}｜推荐 ${recommendations.length} 个${viaRecommend ? '（推荐连刷）' : ''}`
+      `▶ 已打开视频页: ${bvFromUrl(videoUrl) || '无BV'}「${clipText(title, 24)}」总长 ${duration.toFixed(0)}s${pageInfo?.upName ? `｜UP: ${pageInfo.upName}` : ''}${pageInfo?.viewCount ? `｜播放 ${pageInfo.viewCount}` : ''}｜推荐 ${recommendations.length} 个${viaRecommend ? '（推荐连刷）' : ''}`
     );
 
     this.setNextState(MainState.CONTENT_CONSUMING);
@@ -368,10 +369,7 @@ export class OpenVideoTask extends BaseTask {
       return null;
     }
     const pageUrl = page.url().slice(0, 120);
-    const pageTitle = await page
-      .title()
-      .catch(() => '')
-      .then((t) => t.slice(0, 40));
+    const pageTitle = clipText(await page.title().catch(() => ''), 40);
     const selector = this.findVideoEntrySelector();
     const videoLinkCount = await page.$$eval(this.findVideoEntrySelector(), (list) => list.length).catch(() => 0);
     return { pageUrl, pageTitle, selector, videoLinkCount };

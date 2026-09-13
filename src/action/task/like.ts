@@ -4,6 +4,7 @@ import { MainState } from '../engine/state';
 import { MouseMoveBehavior, LeftClickBehavior } from '../behavior';
 import { MousePositionManager } from '../engine/mouse-position-manager';
 import { bvFromUrl, isVideoPageUrl } from '../../utils/bilibili-dom';
+import { clipText } from '../../utils/text';
 
 /**
  * 点赞任务：明确目的「给当前视频点赞」的行为集合。
@@ -58,7 +59,7 @@ export class LikeTask extends BaseTask {
         }
       }
 
-      this.log(`👍 已点赞: ${bvFromUrl(page.url()) || '无BV'}「${(await page.title().catch(() => '')).slice(0, 20)}」`);
+      this.log(`👍 已点赞: ${bvFromUrl(page.url()) || '无BV'}「${clipText(await page.title().catch(() => ''), 20)}」`);
       this.setNextState(MainState.CONTENT_CONSUMING);
       return { success: true, data: { steps: steps.length } };
     } catch (error) {

@@ -3,6 +3,7 @@ import type { TaskContext } from '../execute/context';
 import { MainState } from '../engine/state';
 import { LeftClickBehavior, KeyPressBehavior, ScrollBehavior, SleepBehavior } from '../behavior';
 import { MousePositionManager } from '../engine/mouse-position-manager';
+import { clipText } from '../../utils/text';
 import { HumanScroller } from '../engine/human-scroller';
 import {
   bvFromUrl,
@@ -125,7 +126,7 @@ export class WatchVideoTask extends BaseTask {
       const bvid = bvFromUrl(context.page?.url() ?? '');
       // 真实标题用公共方法取 h1.video-title（比 document.title 准确），并顺带拿 UP 名
       const pageInfo = await extractVideoPageInfo(context.page!).catch(() => null);
-      const vidTitle = (pageInfo?.title || (await context.page?.title().catch(() => '')) || '').slice(0, 24);
+      const vidTitle = clipText(pageInfo?.title || (await context.page?.title().catch(() => '')) || '', 24);
       const planSec = Math.round(this.input.durationMs / 1000);
       const planNote = earlyExit ? '⚡秒关' : `计划 ${planSec}s`;
       this.log(

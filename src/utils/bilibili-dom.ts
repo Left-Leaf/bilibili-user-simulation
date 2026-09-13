@@ -3,6 +3,7 @@
  * 只做轻量 DOM 读取，不发起网络请求；提取失败一律返回空（不影响任务执行）。
  */
 import type { Page, ElementHandle } from 'puppeteer-core';
+import { clipText } from './text';
 
 /** 登录用户信息（B 站右上角头像区 / cookie） */
 export interface LoginUser {
@@ -476,7 +477,7 @@ export interface ProfileEntry {
  */
 export async function collectProfileEntries(page: Page, limit = 20): Promise<ProfileEntry[]> {
   try {
-    return await page.evaluate((n) => {
+    const entries = await page.evaluate((n) => {
       const out: ProfileEntry[] = [];
       const seen = new Set<string>();
       const anchors = document.querySelectorAll('a[href*="space.bilibili.com/"]');
@@ -492,13 +493,15 @@ export async function collectProfileEntries(page: Page, limit = 20): Promise<Pro
           (a as HTMLAnchorElement).getAttribute('title')?.trim() ||
           (a as HTMLAnchorElement).textContent?.trim() ||
           '';
-        out.push({ uid, name: name.slice(0, 40), href });
+        out.push({ uid, name, href }); // 名字先原样带出，截断留给 Node 侧（页面上下文里调不到 clipText）
         if (out.length >= n) {
           break;
         }
       }
       return out;
     }, limit);
+    // 按完整字符截断：名字可能含 emoji，按码元剪会造出孤立代理字符
+    return entries.map((entry) => ({ ...entry, name: clipText(entry.name, 40) }));
   } catch {
     return [];
   }
@@ -568,7 +571,7 @@ export interface DynamicItem {
  */
 export async function extractDynamics(page: Page, limit = 10): Promise<DynamicItem[]> {
   try {
-    return await page.evaluate((n) => {
+    const dynamics = await page.evaluate((n) => {
       const out: DynamicItem[] = [];
       const items = document.querySelectorAll('.bili-dyn-item');
       for (const item of items) {
@@ -576,7 +579,7 @@ export async function extractDynamics(page: Page, limit = 10): Promise<DynamicIt
         const text =
           item.querySelector('.bili-dyn-content__orig__desc .bili-rich-text__content, .bili-dyn-content__text')?.textContent?.trim() ?? '';
         if (author || text) {
-          out.push({ author, text: text.slice(0, 60) });
+          out.push({ author, text }); // 正文先原样带出，截断留给 Node 侧
         }
         if (out.length >= n) {
           break;
@@ -584,6 +587,8 @@ export async function extractDynamics(page: Page, limit = 10): Promise<DynamicIt
       }
       return out;
     }, limit);
+    // 按完整字符截断：动态正文常带 emoji
+    return dynamics.map((item) => ({ ...item, text: clipText(item.text, 60) }));
   } catch {
     return [];
   }
@@ -819,7 +824,7 @@ export interface CommentsInfo {
  */
 export async function extractComments(page: Page, limit = 10): Promise<CommentsInfo | null> {
   try {
-    return await page.evaluate((n) => {
+    const info = await page.evaluate((n) => {
       const out: CommentsInfo = { total: 0, comments: [] };
 
       // 在 root 及其所有 shadowRoot 后代中查找第一个匹配 selector 的元素
@@ -879,7 +884,7 @@ export async function extractComments(page: Page, limit = 10): Promise<CommentsI
         out.comments.push({
           author: nameLink?.textContent?.trim() ?? '',
           authorUid: nameLink?.href.match(/space\.bilibili\.com\/(\d+)/)?.[1] ?? '',
-          text: contentEl?.textContent?.trim().slice(0, 200) ?? '',
+          text: contentEl?.textContent?.trim() ?? '', // 正文先原样带出，截断留给 Node 侧
           pubdate,
           like,
           isUp: !!rs.querySelector('#user-up'),
@@ -890,6 +895,8 @@ export async function extractComments(page: Page, limit = 10): Promise<CommentsI
       }
       return out;
     }, limit);
+    // 按完整字符截断：评论正文可能含 emoji（只影响展示，includes() 验证用的是更短的前缀）
+    return { ...info, comments: info.comments.map((c) => ({ ...c, text: clipText(c.text, 200) })) };
   } catch {
     return null;
   }
